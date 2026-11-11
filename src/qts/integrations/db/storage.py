@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from qts.core.errors import PersistenceError
 from qts.core.logging import REDACTED, get_logger
-from qts.core.types import Fill, Trade
+from qts.core.types import Fill, SignalRecord, Trade
 from qts.integrations.db.models import (
     EquityPoint,
     FillRow,
@@ -31,6 +31,8 @@ from qts.integrations.db.models import (
     RiskDecisionRow,
     RiskEventRow,
     Run,
+    ServiceCheck,
+    SignalRow,
     SystemEvent,
     TradeRow,
 )
@@ -428,7 +430,75 @@ class Storage:
                 ).all()
             )
 
+    # ------------------------------------------------------------------ signals
+    def add_signals(self, run_id: str, records: Iterable[SignalRecord]) -> None:
+        """Store what the strategy said on each candle (idempotent per candle)."""
+        with self.session() as s:
+            for r in records:
+                finite = r.stop_distance == r.stop_distance and abs(r.stop_distance) != float("inf")
+                s.merge(
+                    SignalRow(
+                        run_id=run_id,
+                        ts=r.timestamp,
+                        symbol=r.symbol,
+                        close=r.close,
+                        entry=r.entry,
+                        exit=r.exit,
+                        stop_distance=r.stop_distance if finite else None,
+                        in_position=r.in_position,
+                        action=r.action,
+                    )
+                )
+
+    def signals(self, run_id: str) -> list[SignalRow]:
+        with self.session() as s:
+            return list(
+                s.scalars(
+                    select(SignalRow)
+                    .where(SignalRow.run_id == run_id)
+                    .order_by(SignalRow.ts, SignalRow.symbol)
+                ).all()
+            )
+
     # --------------------------------------------------------------- operations
+    def add_service_checks(self, ts: datetime, checks: Iterable[tuple[str, bool, str]]) -> None:
+        """Append one monitoring cycle: ``(name, ok, detail)`` per check."""
+        with self.session() as s:
+            s.add_all(
+                ServiceCheck(ts=ts, name=name, ok=ok, detail=detail[:500])
+                for name, ok, detail in checks
+            )
+
+    def service_checks(self, start: datetime, end: datetime) -> list[ServiceCheck]:
+        with self.session() as s:
+            return list(
+                s.scalars(
+                    select(ServiceCheck)
+                    .where(ServiceCheck.ts >= start, ServiceCheck.ts < end)
+                    .order_by(ServiceCheck.ts, ServiceCheck.id)
+                ).all()
+            )
+
+    def events_between(self, start: datetime, end: datetime) -> list[SystemEvent]:
+        with self.session() as s:
+            return list(
+                s.scalars(
+                    select(SystemEvent)
+                    .where(SystemEvent.ts >= start, SystemEvent.ts < end)
+                    .order_by(SystemEvent.id)
+                ).all()
+            )
+
+    def risk_events(self, run_id: str) -> list[RiskEventRow]:
+        with self.session() as s:
+            return list(
+                s.scalars(
+                    select(RiskEventRow)
+                    .where(RiskEventRow.run_id == run_id)
+                    .order_by(RiskEventRow.id)
+                ).all()
+            )
+
     def record_event(self, level: str, component: str, message: str) -> None:
         with self.session() as s:
             s.add(SystemEvent(ts=_now(), level=level, component=component, message=message[:2000]))

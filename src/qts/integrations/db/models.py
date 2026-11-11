@@ -158,3 +158,33 @@ class PaperState(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True)
     state: Mapped[dict[str, Any]] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(TS)
+
+
+class SignalRow(Base):
+    """What the strategy said for one symbol on one candle, and what followed."""
+
+    __tablename__ = "signals"
+
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id", ondelete="CASCADE"), primary_key=True)
+    ts: Mapped[datetime] = mapped_column(TS, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(32), primary_key=True)
+    close: Mapped[float] = mapped_column(Float)
+    entry: Mapped[bool] = mapped_column(Boolean)
+    exit: Mapped[bool] = mapped_column(Boolean)
+    stop_distance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    in_position: Mapped[bool] = mapped_column(Boolean)
+    #: entry_queued | exit_queued | hold | flat
+    action: Mapped[str] = mapped_column(String(32))
+
+
+class ServiceCheck(Base):
+    """One health check of one monitoring cycle (availability history)."""
+
+    __tablename__ = "service_checks"
+    __table_args__ = (Index("ix_service_checks_ts", "ts"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(TS)
+    name: Mapped[str] = mapped_column(String(64))
+    ok: Mapped[bool] = mapped_column(Boolean)
+    detail: Mapped[str] = mapped_column(Text)

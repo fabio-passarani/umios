@@ -99,3 +99,18 @@ class Trade:
     pnl: float
     return_pct: float
     exit_reason: OrderReason
+
+
+@dataclass(frozen=True, slots=True)
+class SignalRecord:
+    """What the strategy said for a symbol at the close of a candle and what the
+    session did with it (``entry_queued`` | ``exit_queued`` | ``hold`` | ``flat``)."""
+
+    timestamp: datetime
+    symbol: str
+    close: float
+    entry: bool
+    exit: bool
+    stop_distance: float
+    in_position: bool
+    action: str

@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Any
 
 from qts.core.config import CostConfig
-from qts.core.types import Fill, Order, OrderReason, Side, Trade
+from qts.core.types import Fill, Order, OrderReason, Side, SignalRecord, Trade
 from qts.execution.broker import PaperBroker
 from qts.execution.router import OrderRouter
 from qts.portfolio.portfolio import Portfolio, Position
@@ -88,6 +88,7 @@ class TradingSession:
         self.router = OrderRouter(risk_engine, self.broker)
         self.bar_duration = bar_duration
         self.equity_curve: list[EquityPoint] = []
+        self.signal_log: list[SignalRecord] = []
         self.last_close: dict[str, float] = {}
         self.last_bar_time: datetime | None = None
         self._pending: dict[str, _Pending] = {}
@@ -225,6 +226,7 @@ class TradingSession:
         for symbol in symbols:
             position = self.portfolio.positions.get(symbol)
             signal = signals.get(symbol)
+            action = "hold" if position is not None else "flat"
             if position is not None:
                 close = bars[symbol].close
                 position.highest_close = max(position.highest_close or close, close)
@@ -235,8 +237,10 @@ class TradingSession:
                         position.stop_is_trailing = True
                 if flatten:
                     self._pending[symbol] = _Pending("exit", reason=OrderReason.KILL_SWITCH)
+                    action = "exit_queued"
                 elif signal is not None and signal.exit:
                     self._pending[symbol] = _Pending("exit", reason=OrderReason.EXIT_SIGNAL)
+                    action = "exit_queued"
             elif (
                 signal is not None
                 and signal.entry
@@ -245,6 +249,20 @@ class TradingSession:
                 and signal.stop_distance > 0
             ):
                 self._pending[symbol] = _Pending("entry", stop_distance=signal.stop_distance)
+                action = "entry_queued"
+            if signal is not None:
+                self.signal_log.append(
+                    SignalRecord(
+                        timestamp=timestamp,
+                        symbol=symbol,
+                        close=bars[symbol].close,
+                        entry=signal.entry,
+                        exit=signal.exit,
+                        stop_distance=signal.stop_distance,
+                        in_position=position is not None,
+                        action=action,
+                    )
+                )
         return point
 
     @property
