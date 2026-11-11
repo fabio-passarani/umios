@@ -27,7 +27,7 @@ from qts.core.config import RiskLimits
 from qts.core.errors import RiskViolationError
 from qts.core.types import Order, OrderReason, Side, TradingMode
 from qts.risk.journal import RiskJournal
-from qts.risk.kill_switch import KillSwitch
+from qts.risk.kill_switch import ENGINE_SOURCE, KillSwitch
 from qts.risk.models import CheckResult, RiskApproval, RiskDecision
 
 _TOLERANCE = 1e-9
@@ -192,7 +192,7 @@ class RiskEngine:
     def _trip(self, timestamp: datetime, reason: str, kind: str) -> None:
         if not self.kill_switch.active:
             self.journal.record_event(timestamp, f"kill_switch:{kind}", reason)
-        self.kill_switch.activate(reason, source="risk_engine", at=timestamp)
+        self.kill_switch.activate(reason, source=ENGINE_SOURCE, at=timestamp)
 
     # ------------------------------------------------------------- evaluation
     def evaluate(self, order: Order, context: RiskContext) -> RiskDecision:

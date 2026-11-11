@@ -248,3 +248,60 @@ def test_snapshot_restore_preserves_circuit_breakers() -> None:
     assert clone.daily_halt
     assert clone.drawdown == pytest.approx(risk.drawdown)
     assert clone.snapshot() == risk.snapshot()
+
+
+# ---------------------------------------------------------------- kill switch file
+def test_kill_from_another_process_stops_a_running_engine(tmp_path: Path) -> None:
+    """`qts risk kill` runs in its own process: the service that is already
+    running must see it without being restarted."""
+    path = tmp_path / "kill.json"
+    running = KillSwitch(path)
+    risk = engine(kill_switch=running)
+    assert risk.evaluate(buy(), context()).approved
+
+    KillSwitch(path).activate("operator stop", source="operator")  # another process
+
+    assert running.active
+    assert running.state.reason == "operator stop"
+    assert "kill_switch" in failed(risk.evaluate(buy(), context()))
+
+
+def test_reset_from_another_process_is_seen_too(tmp_path: Path) -> None:
+    path = tmp_path / "kill.json"
+    running = KillSwitch(path)
+    KillSwitch(path).activate("operator stop", source="operator")
+    assert running.active
+    KillSwitch(path).reset("fabio")
+    assert not running.active
+    path.unlink()  # state directory wiped: nothing says "active"
+    assert not running.active
+
+
+def test_operator_kill_blocks_decisions_stamped_before_the_activation() -> None:
+    """Candles are stamped with their open time, which is earlier than the moment
+    a human pulls the switch. That must not let an entry through."""
+    risk = engine()
+    risk.kill_switch.activate("manual stop", source="operator", at=NOW + timedelta(hours=8))
+    assert risk.kill_switch.is_active_at(NOW)
+    assert "kill_switch" in failed(risk.evaluate(buy(), context()))
+
+
+def test_engine_trip_keeps_simulated_time_so_replays_are_reproducible() -> None:
+    risk = engine(max_drawdown_pct=0.10)
+    risk.on_equity_update(NOW, 10_000.0)
+    risk.on_equity_update(NOW + timedelta(days=1), 8_900.0)
+    assert risk.kill_switch.active
+    assert not risk.kill_switch.is_active_at(NOW)  # before the breach, in simulated time
+    assert risk.kill_switch.is_active_at(NOW + timedelta(days=1))
+
+
+@pytest.mark.parametrize(
+    "content", ["", "[]", "null", '{"active": "false"}', '{"active": true, "activated_at": "x"}']
+)
+def test_malformed_kill_switch_file_fails_closed(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "kill.json"
+    path.write_text(content)
+    switch = KillSwitch(path)
+    assert switch.active
+    assert switch.is_active_at(NOW)
+    assert "kill_switch" in failed(engine(kill_switch=switch).evaluate(buy(), context()))
