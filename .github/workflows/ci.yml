@@ -57,7 +57,7 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev,reporting,ai]"
       - run: pytest --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=85
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: matrix.python == '3.12'
         with:
           name: coverage
