@@ -8,8 +8,11 @@ import httpx
 import pandas as pd
 import pytest
 
+from qts.core.config import AppConfig
 from qts.core.errors import DataError
 from qts.market_data.schema import check_quality, normalize_ohlcv
+from qts.market_data.service import load_universe, update_history
+from qts.market_data.sources.base import MarketDataSource
 from qts.market_data.sources.binance_vision import BinanceVisionSource, parse_klines_csv
 from qts.market_data.store import ParquetStore
 from tests.conftest import make_candles
@@ -147,3 +150,41 @@ def test_store_refuses_corrupt_data_and_missing_symbol(tmp_path: Path) -> None:
         store.write("binance", "BTC/USDT", "1d", bad)
     with pytest.raises(DataError, match="no stored data"):
         store.read("binance", "ETH/USDT", "1d")
+
+
+class _FakeSource(MarketDataSource):
+    name = "binance"
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+        self.calls: list[tuple[str, date, date]] = []
+
+    def fetch_ohlcv(self, symbol: str, timeframe: str, start: date, end: date) -> pd.DataFrame:
+        self.calls.append((symbol, start, end))
+        lo, hi = pd.Timestamp(start, tz="UTC"), pd.Timestamp(end, tz="UTC")
+        return self.frame.loc[(self.frame.index >= lo) & (self.frame.index <= hi)]
+
+
+def test_update_history_is_incremental_and_idempotent(tmp_path: Path) -> None:
+    config = AppConfig.model_validate(
+        {
+            "market": {"symbols": ["BTC/USDT"]},
+            "data": {"directory": str(tmp_path), "start": "2024-01-01", "end": "2024-03-10"},
+            "risk": {"allowed_symbols": None},
+        }
+    )
+    candles = make_candles(range(100, 170), start="2024-01-01")  # through 2024-03-10
+    store = ParquetStore(tmp_path)
+    source = _FakeSource(candles.iloc[:45])  # history published so far
+    first = update_history(config, source, store)
+    assert first["BTC/USDT"].rows == 45
+    assert source.calls[0][1] == date(2024, 1, 1)
+
+    source.frame = candles
+    second = update_history(config, source, store)
+    assert second["BTC/USDT"].rows == 70
+    assert second["BTC/USDT"].missing_candles == 0
+    assert source.calls[1][1] == date(2024, 2, 1)  # only re-fetches from the last stored month
+    assert update_history(config, source, store)["BTC/USDT"].rows == 70
+    loaded = load_universe(config, store)["BTC/USDT"]
+    assert loaded["close"].tolist() == candles["close"].tolist()
