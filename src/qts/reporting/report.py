@@ -100,6 +100,9 @@ def validation_to_dict(report: ValidationReport) -> dict[str, Any]:
                 "windows": [asdict(w) for w in wf.windows],
             },
             "monte_carlo": asdict(report.monte_carlo),
+            "out_of_sample_start": report.split,
+            "provenance": report.provenance,
+            "robustness": asdict(report.robustness) if report.robustness else None,
             "warnings": report.warnings,
         }
     )
@@ -136,6 +139,7 @@ def render_markdown(report: ValidationReport) -> str:
         "warnings at the end before drawing any conclusion.",
         "",
     ]
+    out += _provenance_markdown(report)
     for sample in (report.full, report.in_sample, report.out_of_sample):
         out += [
             f"## {sample.label.replace('_', ' ').title()} "
@@ -182,8 +186,213 @@ def render_markdown(report: ValidationReport) -> str:
         out.append(
             f"| {label} | {format_metric(mc.observed[key], kind)} | " + " | ".join(cells) + " |"
         )
-    out += ["", "## Warnings", ""] + [f"- {w}" for w in report.warnings] + [""]
+    out += _robustness_markdown(report)
+    out += ["", "## Warnings and limits", ""] + [f"- {w}" for w in report.warnings] + [""]
     return "\n".join(out)
+
+
+def _pct(value: float | None) -> str:
+    return format_metric(value, "pct")
+
+
+def _num(value: float | None) -> str:
+    return format_metric(value, "num")
+
+
+def _table(header: list[str], rows: list[list[str]], right_from: int = 1) -> list[str]:
+    align = ["---" if i < right_from else "---:" for i in range(len(header))]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(align) + "|"]
+    return lines + ["| " + " | ".join(row) + " |" for row in rows]
+
+
+def _provenance_markdown(report: ValidationReport) -> list[str]:
+    p = report.provenance
+    if not p:
+        return []
+    code, period = p["code"], p["period"]
+    commit = code["git_commit"][:12] + (
+        " **with uncommitted changes**" if code["git_dirty"] else ""
+    )
+    lines = [
+        "## Provenance",
+        "",
+        f"- Period: {period['start'][:10]} → {period['end'][:10]} ({period['bars']} bars), "
+        + ("pinned" if period["pinned"] else "**not pinned (data.end is open)**"),
+        f"- Out-of-sample starts: {report.split:%Y-%m-%d}"
+        + (
+            " (fixed date)"
+            if report.config["validation"].get("out_of_sample_start")
+            else " (**moving fraction**)"
+        )
+        if report.split is not None
+        else "- Out-of-sample start: n/a",
+        f"- Strategy: `{p['strategy']['name']}` version {p['strategy']['version']}",
+        f"- Data version: `{p['data_version']['id']}`",
+    ]
+    for symbol, info in p["data_version"]["symbols"].items():
+        lines.append(f"  - {symbol}: {info['rows']} candles, sha256 `{info['sha256'][:16]}…`")
+    lines += [
+        f"- Code: commit `{commit}`, qts {code['qts']}, Python {code['python']}, "
+        f"numpy {code['numpy']}, pandas {code['pandas']}",
+        f"- Result hash (full-period equity curve): `{p['result_hash']}`",
+        f"- Reproducible: {'yes' if p['reproducible'] else '**no** (see warnings)'}",
+        "",
+    ]
+    return lines
+
+
+def _robustness_markdown(report: ValidationReport) -> list[str]:
+    study = report.robustness
+    if study is None:
+        return []
+    pct, num = _pct, _num
+    out: list[str] = ["", "## Cost sensitivity", ""]
+    out.append(
+        "The same strategy, unchanged, under different frictions (full period). The configured "
+        "costs are marked."
+    )
+    out.append("")
+    base = (report.config["costs"]["fee_rate"], report.config["costs"]["slippage_bps"])
+    out += _table(
+        ["Fee per fill", "Slippage", "Total return", "CAGR", "Sharpe", "Max drawdown", "Trades"],
+        [
+            [
+                f"{r['fee_rate']:.3%}"
+                + (" ◀" if (r["fee_rate"], r["slippage_bps"]) == base else ""),
+                f"{r['slippage_bps']:.0f} bps",
+                pct(r["total_return"]),
+                pct(r["cagr"]),
+                num(r["sharpe"]),
+                pct(r["max_drawdown"]),
+                f"{int(r['trades'])}",
+            ]
+            for r in study.cost_sensitivity
+        ],
+    )
+
+    s = study.parameter_summary
+    out += ["", "## Parameter sensitivity", ""]
+    out.append(
+        "One parameter at a time moved by ±20% (a diagnostic: nothing is selected from this "
+        f"table). {int(s['variants'])} variants: {pct(s['profitable_share'])} profitable, Sharpe "
+        f"from {num(s['sharpe_min'])} to {num(s['sharpe_max'])} (median {num(s['sharpe_median'])}; "
+        f"default {num(s['default_sharpe'])}); {pct(s['better_than_default_share'])} of the "
+        "variants beat the default."
+    )
+    out.append("")
+    out += _table(
+        ["Parameter", "Value", "Total return", "Sharpe", "Max drawdown", "Trades"],
+        [
+            [
+                str(r["parameter"]),
+                "—" if r["value"] is None else f"{r['value']:g}",
+                pct(r["total_return"]),
+                num(r["sharpe"]),
+                pct(r["max_drawdown"]),
+                f"{int(r['trades'])}",
+            ]
+            for r in study.parameter_sensitivity
+        ],
+        right_from=1,
+    )
+
+    out += ["", "## Market regimes", ""]
+    out.append(
+        "Bull / bear / sideways from the trailing 90-day return of the equal-weight universe "
+        "(above +20%, below -20%, in between) — a rule fixed in advance. Returns are compounded "
+        "over the days in each regime."
+    )
+    out.append("")
+    out += _table(
+        ["Regime", "Days", "Share of time", "Strategy", "Buy & Hold", "Time in market"],
+        [
+            [
+                r["regime"],
+                str(r["days"]),
+                pct(r["share_of_time"]),
+                pct(r["strategy_return"]),
+                pct(r["benchmark_return"]),
+                pct(r["time_in_market"]),
+            ]
+            for r in study.regimes
+        ],
+    )
+    out += ["", "## Calendar years", ""]
+    out += _table(
+        ["Year", "Strategy", "Buy & Hold", "Strategy max drawdown", "Trades closed"],
+        [
+            [
+                str(r["year"]),
+                pct(r["strategy_return"]),
+                pct(r["benchmark_return"]),
+                pct(r["max_drawdown"]),
+                str(r["trades"]),
+            ]
+            for r in study.yearly
+        ],
+    )
+
+    e, c = study.exposure, study.correlation
+    out += ["", "## Exposure and correlation", ""]
+    out += [
+        f"- Time in market: {pct(e['time_in_market'])}; average exposure "
+        f"{pct(e['average_exposure'])} of equity "
+        f"({pct(e['average_exposure_when_invested'])} when invested), maximum "
+        f"{pct(e['max_exposure'])}.",
+        f"- Average number of open positions: {num(e['average_positions'])}; all assets held at "
+        f"once {pct(e['time_all_assets_held'])} of the time.",
+        "- Share of time each asset was held: "
+        + ", ".join(f"{sym} {pct(v)}" for sym, v in e["by_symbol"].items())
+        + ".",
+        f"- Median holding period {e['median_holding_days']:.0f} days; longest stretch with no "
+        f"position {e['longest_flat_days']} days.",
+    ]
+    for pair in c["pairs"]:
+        out.append(
+            f"- Daily-return correlation {pair['pair']}: {num(pair['correlation'])} "
+            f"(rolling {c['window']}-day: min {num(pair['rolling_min'])}, median "
+            f"{num(pair['rolling_median'])}, max {num(pair['rolling_max'])})."
+        )
+    if c["pairs"]:
+        out.append(f"- Effective number of independent bets: {num(c['effective_bets'])}.")
+
+    out += ["", "## Statistical significance", ""]
+    rows = []
+    for label, key in (("Full period", "full"), ("Out of sample", "out_of_sample")):
+        g = study.significance[key]
+        rows.append(
+            [
+                label,
+                f"{int(g['trades'])}",
+                pct(g["mean_return"]),
+                num(g["t_stat"]),
+                f"{g['p_value']:.3f}",
+                num(g["sharpe"]),
+                f"[{g['ci_low']:.2f}, {g['ci_high']:.2f}]",
+                pct(g["prob_positive"]),
+            ]
+        )
+    out += _table(
+        [
+            "Sample",
+            "Trades",
+            "Mean trade return",
+            "t-stat",
+            "p (mean ≤ 0)",
+            "Sharpe",
+            "95% interval",
+            "P(Sharpe > 0)",
+        ],
+        rows,
+    )
+    out.append("")
+    out.append(
+        "p-value: one-sided bootstrap of the mean trade return under the null of zero expectancy. "
+        "Sharpe interval: standard error adjusted for skewness and kurtosis of daily returns. "
+        f"{study.significance['declared_trials']} parameter combinations were declared; no "
+        "correction for multiple testing is applied to the figures above."
+    )
+    return out
 
 
 def trades_frame(result: BacktestResult) -> pd.DataFrame:

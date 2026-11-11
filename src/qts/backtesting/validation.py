@@ -20,8 +20,9 @@ import numpy as np
 import pandas as pd
 
 from qts.backtesting.benchmark import buy_and_hold
-from qts.backtesting.engine import BacktestResult, run_backtest
+from qts.backtesting.engine import BacktestResult, provenance_of, run_backtest
 from qts.backtesting.metrics import compute_metrics, max_drawdown, sharpe_ratio
+from qts.backtesting.robustness import RobustnessReport, run_robustness
 from qts.core.config import AppConfig
 from qts.core.errors import DataError
 from qts.core.types import Trade
@@ -290,9 +291,14 @@ class ValidationReport:
     walk_forward: WalkForwardReport
     monte_carlo: MonteCarloReport
     warnings: list[str]
+    split: pd.Timestamp | None = None
+    provenance: dict[str, Any] = field(default_factory=dict)
+    robustness: RobustnessReport | None = None
 
 
-def run_validation(config: AppConfig, data: dict[str, pd.DataFrame]) -> ValidationReport:
+def run_validation(
+    config: AppConfig, data: dict[str, pd.DataFrame], robustness: bool = True
+) -> ValidationReport:
     """Run the whole pipeline and attach plain-language warnings."""
     index = common_index(data)
     split = split_point(
@@ -328,6 +334,20 @@ def run_validation(config: AppConfig, data: dict[str, pd.DataFrame]) -> Validati
         warnings.append(f"Monte Carlo: {mc.probability_of_loss:.0%} of resampled paths lose money.")
     if full.result.kill_switch_active:
         warnings.append("The kill switch tripped during the full-period backtest.")
+    provenance = provenance_of(full.result, data)
+    if not provenance["period"]["pinned"]:
+        warnings.append(
+            "data.end is not set: the period grows every day, so this report cannot be "
+            "reproduced later. Pin data.end before publishing a result."
+        )
+    if config.validation.out_of_sample_start is None:
+        warnings.append(
+            "The in/out-of-sample boundary is a fraction of the data and moves when the data "
+            "grows. Set validation.out_of_sample_start to fix it."
+        )
+    study = run_robustness(config, data, full.result, out_sample.result) if robustness else None
+    if study is not None:
+        warnings.extend(study.notes)
     return ValidationReport(
         config_fingerprint=config.fingerprint(),
         config=config.model_dump(mode="json"),
@@ -337,4 +357,7 @@ def run_validation(config: AppConfig, data: dict[str, pd.DataFrame]) -> Validati
         walk_forward=wf,
         monte_carlo=mc,
         warnings=warnings,
+        split=split,
+        provenance=provenance,
+        robustness=study,
     )
