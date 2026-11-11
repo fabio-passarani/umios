@@ -10,7 +10,11 @@ from typing import Any
 from uuid import uuid4
 
 import pandas as pd
-from sqlalchemy import create_engine, delete, select, text
+from alembic import command
+from alembic.config import Config
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
+from sqlalchemy import create_engine, delete, inspect, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -19,7 +23,6 @@ from qts.core.errors import PersistenceError
 from qts.core.logging import REDACTED, get_logger
 from qts.core.types import Fill, Trade
 from qts.integrations.db.models import (
-    Base,
     EquityPoint,
     FillRow,
     Heartbeat,
@@ -36,6 +39,7 @@ from qts.risk.journal import RiskEvent
 from qts.risk.models import RiskDecision
 
 log = get_logger("db")
+MIGRATIONS = Path(__file__).parent / "migrations"
 
 
 def _now() -> datetime:
@@ -117,12 +121,79 @@ class Storage:
             self._unit = None
             session.close()
 
-    def init_schema(self) -> None:
-        """Create all tables if they do not exist (idempotent)."""
+    # ------------------------------------------------------------------ schema
+    @staticmethod
+    def _alembic_config() -> Config:
+        config = Config()
+        config.set_main_option("script_location", str(MIGRATIONS))
+        return config
+
+    @classmethod
+    def head_revision(cls) -> str:
+        """Newest migration shipped with this version of the code."""
+        head = ScriptDirectory.from_config(cls._alembic_config()).get_current_head()
+        if head is None:  # pragma: no cover - the package always ships revision 0001
+            raise PersistenceError("no database migrations found in the package")
+        return head
+
+    def schema_revision(self) -> str | None:
+        """Migration the database is at (``None`` for an empty or pre-migration one)."""
         try:
-            Base.metadata.create_all(self.engine)
+            with self.engine.connect() as connection:
+                return MigrationContext.configure(connection).get_current_revision()
         except SQLAlchemyError as exc:
-            raise PersistenceError(f"cannot create schema: {type(exc).__name__}") from exc
+            raise PersistenceError(f"cannot read schema version: {type(exc).__name__}") from exc
+
+    def upgrade(self, revision: str = "head") -> str:
+        """Apply the missing migrations (needs an account allowed to run DDL).
+
+        A database created before migrations existed already has the tables of
+        revision 0001 but no version record: it is stamped, not re-created.
+        Returns the revision the database is at afterwards.
+        """
+        config = self._alembic_config()
+        try:
+            with self.engine.begin() as connection:
+                config.attributes["connection"] = connection
+                tables = set(inspect(connection).get_table_names())
+                if "runs" in tables and "alembic_version" not in tables:
+                    command.stamp(config, "0001")
+                command.upgrade(config, revision)
+                self._protect_version_table(connection)
+        except SQLAlchemyError as exc:
+            raise PersistenceError(f"schema upgrade failed: {type(exc).__name__}") from exc
+        return self.schema_revision() or ""
+
+    @staticmethod
+    def _protect_version_table(connection: Any) -> None:
+        """Only the migrating account may change what the database claims to be:
+        the application role gets read access to ``alembic_version``, nothing else."""
+        if connection.dialect.name != "postgresql":
+            return
+        if connection.execute(text("SELECT 1 FROM pg_roles WHERE rolname = 'qts_app'")).first():
+            connection.execute(
+                text("REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON alembic_version FROM qts_app")
+            )
+
+    def init_schema(self) -> None:
+        """Make sure the schema is at the version this code expects (idempotent).
+
+        If it is not, the migrations are applied — which only works for an
+        account with DDL rights. The application's own PostgreSQL role has none
+        on purpose: there the administrator runs ``qts db upgrade`` first (the
+        Docker stack does it in its ``migrate`` service).
+        """
+        head = self.head_revision()
+        current = self.schema_revision()
+        if current == head:
+            return
+        try:
+            self.upgrade()
+        except PersistenceError as exc:
+            raise PersistenceError(
+                f"database schema is at revision {current or 'none'}, this version needs "
+                f"{head}: run `qts db upgrade` with an administrative account"
+            ) from exc
 
     def ping(self) -> bool:
         """True if the database answers a trivial query."""

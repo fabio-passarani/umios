@@ -68,7 +68,7 @@ class Runtime:
 
     @functools.cached_property
     def storage(self) -> Storage:
-        storage = Storage(self.settings.database_url.get_secret_value())
+        storage = Storage(self.settings.resolved_database_url())
         storage.init_schema()
         return storage
 
@@ -392,10 +392,34 @@ def risk_reset(
 @db_app.command("init")
 @_guard
 def db_init(config: ConfigOption = None) -> None:
-    """Create the database schema (idempotent)."""
+    """Create or upgrade the database schema (same as `db upgrade`; idempotent)."""
+    db_upgrade(config)
+
+
+@db_app.command("upgrade")
+@_guard
+def db_upgrade(config: ConfigOption = None) -> None:
+    """Apply pending schema migrations. Needs an account with DDL rights."""
     rt = Runtime(config)
-    _ = rt.storage
-    typer.echo("Database schema ready.")
+    storage = Storage(rt.settings.resolved_database_url())
+    before = storage.schema_revision()
+    after = storage.upgrade()
+    typer.echo(
+        f"Database schema ready: revision {after}"
+        + (f" (was {before or 'empty'})" if before != after else " (already up to date)")
+    )
+
+
+@db_app.command("current")
+@_guard
+def db_current(config: ConfigOption = None) -> None:
+    """Show the schema revision of the database and the one this version needs."""
+    rt = Runtime(config)
+    storage = Storage(rt.settings.resolved_database_url())
+    current, head = storage.schema_revision(), Storage.head_revision()
+    typer.echo(f"database: {current or 'none'}   code: {head}")
+    if current != head:
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":  # pragma: no cover

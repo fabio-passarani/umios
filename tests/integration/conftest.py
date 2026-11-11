@@ -27,13 +27,21 @@ def storage(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Storage]
     if not url:
         pytest.skip("QTS_TEST_DATABASE_URL not set")
     store = Storage(url)
+    _wipe(store)
+    store.init_schema()
+    yield store
+    _wipe(store)
+    store.engine.dispose()
+
+
+def _wipe(store: Storage) -> None:
+    from sqlalchemy import text
+
     from qts.integrations.db.models import Base
 
     Base.metadata.drop_all(store.engine)
-    store.init_schema()
-    yield store
-    Base.metadata.drop_all(store.engine)
-    store.engine.dispose()
+    with store.engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
 
 
 @pytest.fixture
