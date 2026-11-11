@@ -104,6 +104,8 @@ jobs:
         run: |
           test "$(id -u)" != 0
           scripts/restore_test.sh
+      - name: End-to-end paper trading (strategy-generated signals, restarts, bad data, disaster recovery)
+        run: scripts/e2e_paper_test.sh
       - if: always()
         run: docker compose --profile freqtrade down -v
 

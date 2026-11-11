@@ -103,6 +103,13 @@ services:
     <<: *qts
     command: ["paper", "run", "--interval-minutes", "60"]
 
+  # Watches everything else: health checks every 5 minutes (history in the
+  # database), daily reports in ./reports/daily. Separate from the trader on
+  # purpose: a trader that hangs is noticed by something that is still alive.
+  monitor:
+    <<: *qts
+    command: ["monitor", "run", "--interval-minutes", "5", "--reports", "/app/reports/daily"]
+
   grafana:
     image: grafana/grafana:${GRAFANA_VERSION:-12.2.1}
     restart: unless-stopped
@@ -177,7 +184,7 @@ services:
       BACKUP_KEEP: ${BACKUP_KEEP:-14}
       BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
     volumes:
-      - ./backups:/backups
+      - ${QTS_BACKUP_DIR:-./backups}:/backups
       - qts-state:/state:ro
       - ./docker/postgres/backup.sh:/backup.sh:ro
     entrypoint: ["/bin/sh", "-c"]
@@ -200,7 +207,7 @@ services:
       <<: *admin-db
       BACKUP_KEEP: ${BACKUP_KEEP:-14}
     volumes:
-      - ./backups:/backups
+      - ${QTS_BACKUP_DIR:-./backups}:/backups
       - qts-state:/state:ro
       - ./docker/postgres/backup.sh:/backup.sh:ro
     entrypoint: ["/bin/sh", "/backup.sh"]

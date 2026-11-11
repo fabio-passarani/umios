@@ -11,6 +11,10 @@ dc() {  # docker compose for the selected project
 }
 fail() { echo "FAILED: $*" >&2; exit 1; }
 
+# Where backups live on the host (the compose file reads the same variable).
+export QTS_BACKUP_DIR="${QTS_BACKUP_DIR:-./backups}"
+BACKUPS="${QTS_BACKUP_DIR#./}"
+
 # Tables whose content must survive a restore byte for byte.
 QTS_TABLES="runs equity_points fills trades positions risk_decisions risk_events paper_state"
 

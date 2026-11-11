@@ -72,7 +72,12 @@ class Monitor:
             SERVICE, "ok", f"{len(checks) - len(failing)}/{len(checks)} checks healthy"
         )
         if self.reports is not None:
-            self.write_reports(now)
+            try:
+                self.write_reports(now)
+            except OSError as exc:
+                # The reports directory is a host mount: wrong ownership there must
+                # not stop the monitoring. `qts report daily` still prints the report.
+                log.error("daily_report_not_written", error=type(exc).__name__, detail=str(exc))
         return checks
 
     def write_reports(self, now: datetime, days: int = 3) -> list[Path]:

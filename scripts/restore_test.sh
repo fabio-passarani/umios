@@ -11,11 +11,11 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
-[ "${1:-}" = "--existing" ] || { mkdir -p backups; chmod 700 backups; dc run --rm backup; }
-dump="$(newest 'backups/qts-2*.sql.gz')"
-[ -n "$dump" ] || fail "no database dump in ./backups"
+[ "${1:-}" = "--existing" ] || { mkdir -p "$BACKUPS"; chmod 700 "$BACKUPS"; dc run --rm backup; }
+dump="$(newest "$BACKUPS/qts-2*.sql.gz")"
+[ -n "$dump" ] || fail "no database dump in $BACKUPS"
 stamp="$(basename "$dump" .sql.gz)"; stamp="${stamp#qts-}"
-state="backups/qts-state-${stamp}.tar.gz"
+state="$BACKUPS/qts-state-${stamp}.tar.gz"
 echo "== testing $dump"
 
 live="$(fingerprint_sql | dc exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -At -F ' ')"
