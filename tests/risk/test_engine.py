@@ -305,3 +305,16 @@ def test_malformed_kill_switch_file_fails_closed(tmp_path: Path, content: str) -
     assert switch.active
     assert switch.is_active_at(NOW)
     assert "kill_switch" in failed(engine(kill_switch=switch).evaluate(buy(), context()))
+
+
+# ------------------------------------------------------------- account consistency
+def test_open_position_without_a_trusted_price_blocks_entries() -> None:
+    """An unpriced position would vanish from exposure and equity."""
+    ctx = context(cash=5_000.0, positions={"ETH/USDT": 10_000.0}, prices={SYMBOL: 100.0})
+    assert "positions_priced" in failed(engine().evaluate(buy(quantity=1.0), ctx))
+
+
+@pytest.mark.parametrize("quantity", [-5.0, float("nan"), float("inf")])
+def test_invalid_position_quantities_are_rejected(quantity: float) -> None:
+    ctx = context(positions={"ETH/USDT": quantity})
+    assert "order_sanity" in failed(engine().evaluate(buy(quantity=1.0), ctx))

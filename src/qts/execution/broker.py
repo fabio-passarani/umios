@@ -39,7 +39,9 @@ class PaperBroker(Broker):
         self.costs = costs
 
     def execute(self, approval: RiskApproval, market_price: float, timestamp: datetime) -> Fill:
-        order = self._risk.consume(approval)  # raises RiskViolationError if not genuine
+        # Raises RiskViolationError unless the approval is genuine, unused, current and
+        # matches this execution (price for entries, time, kill switch).
+        order = self._risk.consume(approval, market_price, timestamp)
         if market_price <= 0:
             raise ExecutionError(f"invalid market price {market_price} for {order.symbol}")
         slip = self.costs.slippage_rate

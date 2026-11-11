@@ -7,7 +7,9 @@ Design rules:
    a strategy bug cannot weaken a check.
 2. **Veto power** — a rejection is final; there is no override parameter.
 3. **Non-bypassable** — brokers execute only a :class:`RiskApproval` that this
-   engine signed (HMAC) and has not yet consumed.
+   engine signed (HMAC) and has not yet consumed. An approval is bound to what
+   was evaluated: it is valid only immediately, only at the approved price, and
+   a newer entry approval revokes any unused older one.
 4. **Fail closed** — any doubt (bad numbers, stale data, tripped kill switch,
    live mode) rejects. Risk-*reducing* sells stay possible so positions can
    always be closed.
@@ -21,7 +23,7 @@ import hmac
 import math
 import secrets
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from qts.core.config import RiskLimits
 from qts.core.errors import RiskViolationError
@@ -31,6 +33,17 @@ from qts.risk.kill_switch import ENGINE_SOURCE, KillSwitch
 from qts.risk.models import CheckResult, RiskApproval, RiskDecision
 
 _TOLERANCE = 1e-9
+
+#: How long an approval may wait before execution. Simulated brokers execute in
+#: the same instant; anything older was decided on an account state that may no
+#: longer exist and must be evaluated again.
+APPROVAL_TTL = timedelta(minutes=1)
+#: Relative difference tolerated between the approved and the executed entry price.
+_PRICE_TOLERANCE = 1e-9
+
+
+def _is_price(value: float | None) -> bool:
+    return value is not None and math.isfinite(value) and value > 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +88,7 @@ class RiskEngine:
         self.kill_switch = kill_switch or KillSwitch()
         self.journal = journal or RiskJournal()
         self._key = secrets.token_bytes(32)
-        self._outstanding: set[str] = set()
+        self._outstanding: dict[str, Side] = {}
         self._consumed: set[str] = set()
         self._peak_equity: float | None = None
         self._last_equity: float | None = None
@@ -213,11 +226,17 @@ class RiskEngine:
         return decision
 
     def _sanity_checks(self, order: Order, ctx: RiskContext) -> list[CheckResult]:
-        numbers = [order.quantity, order.reference_price, ctx.cash]
+        numbers = [order.quantity, order.reference_price, ctx.cash, *ctx.positions.values()]
         if order.stop_price is not None:
             numbers.append(order.stop_price)
         valid = all(math.isfinite(v) for v in numbers)
-        positive = valid and order.quantity > 0 and order.reference_price > 0 and ctx.cash >= 0
+        positive = (
+            valid
+            and order.quantity > 0
+            and order.reference_price > 0
+            and ctx.cash >= 0
+            and all(q >= -_TOLERANCE for q in ctx.positions.values())
+        )
         allowed = self.limits.allowed_symbols
         return [
             CheckResult(
@@ -228,7 +247,7 @@ class RiskEngine:
             CheckResult(
                 "order_sanity",
                 bool(positive),
-                "" if positive else "non-finite or non-positive quantity/price/cash",
+                "" if positive else "non-finite or negative quantity/price/cash/position",
             ),
             CheckResult(
                 "symbol_allowed",
@@ -274,8 +293,18 @@ class RiskEngine:
         )
 
         last_price = ctx.prices.get(order.symbol)
-        if last_price is None or not math.isfinite(last_price) or last_price <= 0:
+        if last_price is None or not _is_price(last_price):
             add("price_available", False, "no trusted reference price for symbol")
+            return results
+        # Every open position must be valued: an unpriced one would silently
+        # disappear from exposure and equity, loosening every percentage limit.
+        unpriced = sorted(
+            s
+            for s, q in ctx.positions.items()
+            if q > _TOLERANCE and not _is_price(ctx.prices.get(s))
+        )
+        if unpriced:
+            add("positions_priced", False, f"no trusted price for open position(s) {unpriced}")
             return results
         deviation = abs(order.reference_price / last_price - 1.0)
         add(
@@ -359,23 +388,64 @@ class RiskEngine:
 
     def _issue(self, order: Order, issued_at: datetime) -> RiskApproval:
         approval = RiskApproval(order, issued_at, self._sign(order, issued_at))
-        self._outstanding.add(order.id)
+        if order.side is Side.BUY:
+            # Each entry is approved against a snapshot of the account. Two unused
+            # entry approvals granted on the same snapshot would both be executable
+            # and together exceed the limits each was checked against, so a new
+            # entry approval revokes every older unused one.
+            self._outstanding = {i: s for i, s in self._outstanding.items() if s is not Side.BUY}
+        self._outstanding[order.id] = order.side
         return approval
 
-    def consume(self, approval: RiskApproval) -> Order:
-        """Validate an approval and mark it used. Brokers must call this before
-        executing; it raises :class:`RiskViolationError` for anything that is not
-        a genuine, unmodified, unused approval issued by *this* engine."""
+    def consume(self, approval: RiskApproval, market_price: float, timestamp: datetime) -> Order:
+        """Validate an approval for execution at ``market_price`` / ``timestamp``
+        and mark it used. Brokers must call this before executing.
+
+        Raises :class:`RiskViolationError` for anything that is not a genuine,
+        unmodified, unused, still-current approval issued by *this* engine, or
+        for an execution that differs from what was approved:
+
+        * the approval is older than :data:`APPROVAL_TTL` (or from the future);
+        * an entry would fill at a price other than the approved one (a higher
+          price means more notional and more risk than was checked);
+        * the kill switch tripped between approval and execution (entries only:
+          closing a position must always stay possible).
+
+        A failed attempt still burns the approval: the caller has to ask again.
+        """
         if not isinstance(approval, RiskApproval):
             raise RiskViolationError("order has no risk approval")
         expected = self._sign(approval.order, approval.issued_at)
         if not hmac.compare_digest(expected, approval.signature):
             raise RiskViolationError("risk approval signature is invalid (forged or altered)")
-        order_id = approval.order.id
-        if order_id in self._consumed:
+        order = approval.order
+        if order.id in self._consumed:
             raise RiskViolationError("risk approval was already used (replay)")
-        if order_id not in self._outstanding:
-            raise RiskViolationError("risk approval was not issued by this engine")
-        self._outstanding.discard(order_id)
-        self._consumed.add(order_id)
-        return approval.order
+        if order.id not in self._outstanding:
+            raise RiskViolationError(
+                "risk approval is not valid here (issued by another engine, or revoked by a "
+                "newer entry approval)"
+            )
+        del self._outstanding[order.id]
+        self._consumed.add(order.id)
+
+        try:
+            age = timestamp - approval.issued_at
+        except TypeError as exc:  # naive vs aware datetimes: cannot prove freshness
+            raise RiskViolationError("risk approval age cannot be determined") from exc
+        if age < timedelta(0) or age > APPROVAL_TTL:
+            raise RiskViolationError(
+                f"risk approval expired (issued {approval.issued_at.isoformat()}, "
+                f"executed {timestamp.isoformat()}): evaluate the order again"
+            )
+        if order.side is Side.BUY:
+            if not isinstance(market_price, int | float) or not _is_price(market_price):
+                raise RiskViolationError(f"invalid execution price {market_price!r}")
+            if abs(market_price / order.reference_price - 1.0) > _PRICE_TOLERANCE:
+                raise RiskViolationError(
+                    f"execution price {market_price} differs from the approved price "
+                    f"{order.reference_price}: evaluate the order again"
+                )
+            if self.kill_switch.is_active_at(timestamp):
+                raise RiskViolationError("kill switch tripped after approval: entry cancelled")
+        return order

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import dataclasses
 import inspect
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +21,7 @@ from qts.portfolio import Portfolio
 from qts.risk.models import RiskApproval
 from qts.strategies import TrendFollowingStrategy
 from tests.conftest import make_candles
-from tests.risk.helpers import NOW, SYMBOL, buy, context, engine
+from tests.risk.helpers import NOW, SYMBOL, buy, context, engine, sell
 
 
 def setup():  # type: ignore[no-untyped-def]
@@ -68,6 +69,83 @@ def test_approval_is_single_use() -> None:
     with pytest.raises(RiskViolationError, match="already used"):
         broker.execute(decision.approval, 100.0, NOW)
     assert portfolio.positions[SYMBOL].quantity == 1.0
+
+
+def test_approval_cannot_be_executed_at_another_price() -> None:
+    """Approved: 30 units at 100 (30% of equity). Executing them at 300 would
+    build a 90% position the engine never looked at."""
+    risk, portfolio, broker = setup()
+    decision = risk.evaluate(buy(quantity=30.0, stop=99.9), context())
+    assert decision.approval is not None
+    with pytest.raises(RiskViolationError, match="differs from the approved price"):
+        broker.execute(decision.approval, 300.0, NOW)
+    assert portfolio.positions == {}
+    assert portfolio.cash == 10_000.0
+    # the failed attempt burned the approval: no second try at the right price
+    with pytest.raises(RiskViolationError, match="already used"):
+        broker.execute(decision.approval, 100.0, NOW)
+
+
+@pytest.mark.parametrize("price", [float("nan"), float("inf"), 0.0, -100.0, 99.0])
+def test_entry_execution_price_must_be_the_approved_one(price: float) -> None:
+    risk, portfolio, broker = setup()
+    decision = risk.evaluate(buy(quantity=1.0), context())
+    assert decision.approval is not None
+    with pytest.raises(RiskViolationError):
+        broker.execute(decision.approval, price, NOW)
+    assert portfolio.positions == {}
+
+
+def test_approval_expires() -> None:
+    risk, portfolio, broker = setup()
+    decision = risk.evaluate(buy(quantity=1.0), context())
+    assert decision.approval is not None
+    with pytest.raises(RiskViolationError, match="expired"):
+        broker.execute(decision.approval, 100.0, NOW + timedelta(days=30))
+    earlier = risk.evaluate(buy(quantity=1.0), context())
+    assert earlier.approval is not None
+    with pytest.raises(RiskViolationError, match="expired"):
+        broker.execute(earlier.approval, 100.0, NOW - timedelta(seconds=1))
+    assert portfolio.positions == {}
+
+
+def test_kill_switch_tripped_after_approval_cancels_the_entry() -> None:
+    risk, portfolio, broker = setup()
+    decision = risk.evaluate(buy(quantity=1.0), context())
+    assert decision.approval is not None
+    risk.kill_switch.activate("operator stop", source="operator")
+    with pytest.raises(RiskViolationError, match="kill switch"):
+        broker.execute(decision.approval, 100.0, NOW)
+    assert portfolio.positions == {}
+
+
+def test_kill_switch_never_blocks_an_approved_exit() -> None:
+    risk, portfolio, broker = setup()
+    entry = risk.evaluate(buy(quantity=5.0), context())
+    assert entry.approval is not None
+    broker.execute(entry.approval, 100.0, NOW)
+    held = context(cash=portfolio.cash, positions={SYMBOL: 5.0})
+    exit_ = risk.evaluate(sell(5.0), held)
+    assert exit_.approval is not None
+    risk.kill_switch.activate("operator stop", source="operator")
+    fill = broker.execute(exit_.approval, 80.0, NOW)  # any price: closing must stay possible
+    assert fill.side is Side.SELL
+    assert portfolio.positions == {}
+
+
+def test_two_entries_approved_on_one_snapshot_cannot_both_execute() -> None:
+    """Each is within the 50% position limit on its own; together they are not.
+    The newer approval revokes the older one."""
+    risk, portfolio, broker = setup()
+    snapshot = context()
+    first = risk.evaluate(buy(quantity=30.0, stop=99.9), snapshot)
+    second = risk.evaluate(buy(quantity=30.0, stop=99.9), snapshot)
+    assert first.approval is not None
+    assert second.approval is not None
+    broker.execute(second.approval, 100.0, NOW)
+    with pytest.raises(RiskViolationError, match="revoked"):
+        broker.execute(first.approval, 100.0, NOW)
+    assert portfolio.positions[SYMBOL].quantity == 30.0
 
 
 def test_approval_from_another_engine_is_rejected() -> None:
