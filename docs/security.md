@@ -11,9 +11,10 @@
 | Broker requests | brokers accept only single-use, HMAC-signed risk approvals, valid for one minute and (for entries) only at the approved price |
 | Downloads | SHA-256 checksum verified for every archive |
 | Network exposure | every Docker port is bound to `127.0.0.1`; Grafana sign-up and anonymous access disabled |
-| Database | Grafana connects with a read-only role; application errors never echo the DSN |
+| Database | four accounts: administrator (migrations and backups, one-shot containers only), `qts_app` (data only: no DDL, no TRUNCATE, no other database), `freqtrade_app` (its own database), `grafana_ro` (read-only); the smoke test asserts what each can and cannot do. Application errors never echo the DSN |
+| Schema | versioned migrations; the application role cannot alter tables or the recorded schema version |
 | Containers | run as a non-root user; configs mounted read-only |
-| Backups | `scripts/backup.sh`, files created with `umask 077` |
+| Backups | automatic daily, verified after writing, private to the owner of `./backups`; restore tested in CI ([backup and restore](backup-restore.md)) |
 | Dependencies | Dependabot for pip, Docker and GitHub Actions; exact audited versions in `requirements-lock.txt` |
 
 ## Before ever considering real money (not part of this MVP)

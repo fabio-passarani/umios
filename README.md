@@ -20,7 +20,9 @@ Backtesting, Paper Trading and AI Research.
 | Validation: in/out-of-sample, walk-forward, Monte Carlo | `qts.backtesting.validation` |
 | Paper trading (same engine as the backtest, state in the database) | `qts.execution.paper` |
 | Freqtrade integration (backtesting and dry-run) through a thin adapter | `freqtrade/`, `qts.integrations.freqtrade` |
-| Operational data in PostgreSQL, Grafana dashboard, health checks, backups | `qts.integrations.db`, `docker/` |
+| Operational data in PostgreSQL (versioned schema, least-privilege accounts), Grafana dashboard | `qts.integrations.db`, `docker/` |
+| Monitoring service, daily report, soak-test verdict, automatic backups with tested restore | `qts.monitoring`, `scripts/` |
+| Reproducible results: stored provenance, `qts reproduce` | `qts.core.provenance` |
 | Research-only ML infrastructure (LightGBM, Optuna, SHAP) | `qts.ai` |
 
 ## Quick start (local Python)
@@ -35,7 +37,8 @@ pip install -e ".[dev,reporting]"        # add ",ai" and/or ",freqtrade" when ne
 qts config                               # validate configs/default.yaml, print fingerprint
 qts data download                        # real BTC/USDT and ETH/USDT daily candles since 2018
 qts backtest                             # strategy vs Buy & Hold, saved to the local database
-qts validate                             # IS/OOS + walk-forward + Monte Carlo -> reports/<run>/
+qts validate                             # IS/OOS, walk-forward, Monte Carlo, robustness -> reports/<run>/
+qts reproduce <run id>                   # re-run a stored backtest and prove it gives the same result
 pytest                                   # test suite
 ```
 
@@ -44,10 +47,13 @@ Without any `.env`, state goes to a local SQLite file under `./state` — no ser
 ## Quick start (Docker: PostgreSQL + paper trading + Grafana)
 
 ```bash
-cp .env.example .env                     # then replace every "change-me" (openssl rand -hex 24)
-docker compose up -d --build             # postgres, paper-trader, grafana
-docker compose logs -f paper-trader
+scripts/setup_host.sh                    # .env with random secrets, ./backups, ./reports
+docker compose up -d --build             # postgres, migrations, paper-trader, monitor, backups, grafana
+docker compose run --rm paper-trader report daily
 ```
+
+Step by step, including how to run it for a week on a VPS and how to judge the
+result: [paper trading runbook](docs/paper-trading-runbook.md).
 
 Grafana: <http://127.0.0.1:3000> (user/password from `.env`) → dashboard *QTS — Trading
 overview*. All ports are bound to `127.0.0.1` only.
@@ -101,21 +107,37 @@ docs/            architecture, strategy, risk, validation, operations, security,
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — modules, data flow, design decisions and why
+Operating it:
+
+- [Paper trading runbook](docs/paper-trading-runbook.md) — start, watch, intervene, stop, verify
+- [Configuration](docs/configuration.md) — every YAML key and environment variable
+- [Backup and restore](docs/backup-restore.md) — what is saved, how to prove it, how to restore
+- [Troubleshooting](docs/troubleshooting.md) — symptom, cause, fix
+- [Operations](docs/operations.md) — commands and services at a glance
+
+Understanding it:
+
+- [Architecture](docs/architecture.md) — modules, data flow, runtime, design decisions and why
 - [Strategy](docs/strategy.md) — trend-following rules and parameters
-- [Risk engine](docs/risk.md) — every check, the kill switch, why it cannot be bypassed
-- [Validation](docs/validation.md) — methodology, biases, and the
-  [latest real results](docs/results/2026-11-11-trend-following-validation.md)
-- [Operations](docs/operations.md) — installation, Docker, paper trading, monitoring, backups
+- [Risk engine](docs/risk.md) — the authorisation model, every check, the kill switch
+- [Backtesting and validation](docs/validation.md) — methodology, reproducibility, robustness,
+  and the [latest real results](docs/results/2026-11-11-validation-pinned.md)
 - [Freqtrade](docs/freqtrade.md) — how the integration works and how to run it
-- [Security](docs/security.md) — secrets, modes, what is and is not protected
+- [Security](docs/security.md) — secrets, database accounts, what is and is not protected
 - [Licensing](docs/licensing.md) — dependency licences and why there is no `LICENSE` yet
-- [Roadmap](docs/roadmap.md) — what is **not** implemented yet
-- [Independent audit](docs/independent-audit.md) — what was verified from a clean clone,
-  what was found and fixed, what is still open
+
+Where it stands:
+
+- [Independent audit](docs/independent-audit.md) — what was verified from a clean clone and fixed
+- [Phase 3 report](docs/phase3-report.md) — hardening, what was tested, what is still open
+- [Roadmap](docs/roadmap.md) — what is **not** implemented or not verified yet
 
 ## Quality gates
 
-`ruff check .` · `ruff format --check .` · `mypy` (strict) · `pytest` — all run in
-[GitHub Actions](.github/workflows/ci.yml) together with a build of both Docker images, a
-smoke test of the running stack (`scripts/smoke_test.sh`) and a secret scan.
+`ruff check .` · `ruff format --check .` · `mypy` (strict) · `pytest` (unit, integration,
+PostgreSQL) — all run in [GitHub Actions](.github/workflows/ci.yml) together with a build of
+both Docker images, a smoke test of the running stack, a backup-and-restore test, an
+end-to-end paper trading test and a secret scan.
+
+Branches: `main` is the stable version, `develop` collects finished work, changes arrive
+through pull requests from `feature/*` branches.

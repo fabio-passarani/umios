@@ -7,8 +7,11 @@ sizing and the risk veto stay in the platform.
 freqtrade/user_data/strategies/qts_trend_following.py   (thin IStrategy)
         │ populate_*            -> qts.strategies (same signals as the platform)
         │ custom_stake_amount   -> qts.portfolio.PositionSizer
-        │ confirm_trade_entry   -> qts.risk.RiskEngine  (False = Freqtrade does not enter)
-        │ custom_stoploss       -> ATR stop from the signal candle
+        │ confirm_trade_entry   -> qts.risk.RiskEngine  (fail closed: False = no entry)
+        │ confirm_trade_exit    -> qts.risk.RiskEngine  reduce-only path (fail open, journaled)
+        │ order_filled          -> fixes the ATR stop at entry, stores it with the trade
+        │ custom_stoploss       -> reads the stored stop (survives restarts)
+        │ custom_exit           -> closes everything on kill switch if configured
         ▼
 qts.integrations.freqtrade.FreqtradeBridge   (no Freqtrade import)
 ```
@@ -53,9 +56,22 @@ Optional overlay that points market-data requests to Binance's public mirror
 (it was needed to verify the integration from a US-hosted build machine). It is
 not needed from Italy.
 
-## Not done yet
+## What is and is not on the platform side
 
-- Freqtrade's own trades are stored in its `freqtrade` database and shown in its
-  UI, not in the Grafana dashboard.
-- In Freqtrade the risk engine gates **entries**; exits and stops are executed by
-  Freqtrade itself.
+- The bot's **risk decisions** (entries, vetoes, every exit), its risk events and
+  a heartbeat are written to the platform database as a run of kind `freqtrade`,
+  next to the paper trader's, when the database settings are present (they are in
+  the Docker stack).
+- Freqtrade's own **trades, orders and wallet** stay in its `freqtrade` database
+  and UI; they are not copied to Grafana.
+- Order execution, retries and the stop trigger are Freqtrade's. The platform
+  authorises and records; it does not place Freqtrade's orders.
+
+## Not verified
+
+A dry-run entry produced by a **strategy signal** has not been observed yet: the
+strategy is daily and gave no signal while the bot was running. The path from
+signal to simulated fill was verified for the platform's own paper trader
+(`scripts/e2e_paper_test.sh`) and, for Freqtrade, with forced entries and with
+Freqtrade's backtester (29 trades, identical before and after the adapter
+changes). The first organic dry-run entry will come from the continuous run.

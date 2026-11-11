@@ -14,6 +14,8 @@
                          │ Order (a request, nothing more)
                          ▼
                  risk.RiskEngine ──► journal (every decision)
+                         │   entries: every limit, fail closed
+                         │   exits:   reduce-only path, never blocked
                          │ RiskApproval (HMAC-signed, single use)   ✗ rejected: stops here
                          ▼
                 execution.PaperBroker ──► portfolio.Portfolio (cash, positions, trades)
@@ -24,7 +26,42 @@
 
 The same `TradingSession` drives both the backtest and paper trading. A test proves
 that paper trading fed candle by candle (with process restarts in between)
-reproduces the backtest exactly.
+reproduces the backtest exactly, and `scripts/e2e_paper_test.sh` proves it on the
+running Docker stack.
+
+## Runtime (Docker stack)
+
+```
+                 ┌──────────── one-shot, on every `up` ────────────┐
+                 │ db-setup: roles, grants     migrate: schema     │  (administrator account)
+                 └──────────────────────┬──────────────────────────┘
+                                        ▼
+ paper-trader ──(qts_app)──►        PostgreSQL        ◄──(grafana_ro)── Grafana
+   hourly step: data, signals,   runs · equity · signals · risk_decisions
+   risk engine, simulated fills  fills · trades · positions · paper_state
+                                 risk_events · service_checks · heartbeats
+ monitor ─────(qts_app)──►            ▲      ▲
+   every 5 min: health checks,        │      └──(administrator)── backup-scheduler ──► ./backups
+   daily reports ──► ./reports/daily  │
+ freqtrade (optional) ──(qts_app: risk journal)──┘   own database: (freqtrade_app)
+
+ shared volume qts-state: kill_switch.json, freqtrade_risk_state.json
+```
+
+- A paper step is **one database transaction**: equity, signals, orders, fills,
+  trades, positions and the resume point are committed together or not at all.
+- The **kill switch** is a file on the shared state volume, re-read on every
+  decision: one command stops the entries of every running service.
+- The **monitor** is a separate process on purpose: it notices a trader that hangs.
+- Nothing needs an inbound port; every published port is bound to `127.0.0.1`.
+
+## Reproducibility
+
+A stored backtest carries its *provenance*: period, universe, strategy version,
+parameters, costs, a content hash of the candles, the Git commit and a hash of the
+equity curve (`qts.core.provenance`). `qts reproduce RUN_ID` re-runs it and
+compares. Research configurations pin `data.end` and the out-of-sample boundary;
+the paper configuration is open-ended because it trades forward.
 
 ## Design decisions
 
