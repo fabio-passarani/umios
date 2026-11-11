@@ -1,0 +1,11 @@
+{
+    "$schema": "https://schema.freqtrade.io/schema.json",
+    "api_server": {
+        "enabled": true,
+        "listen_ip_address": "0.0.0.0",
+        "listen_port": 8080,
+        "verbosity": "error",
+        "enable_openapi": false,
+        "CORS_origins": []
+    }
+}

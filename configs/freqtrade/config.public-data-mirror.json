@@ -1,0 +1,9 @@
+{
+    "$schema": "https://schema.freqtrade.io/schema.json",
+    "exchange": {
+        "ccxt_config": {
+            "urls": {"api": {"public": "https://data-api.binance.vision/api/v3"}},
+            "options": {"fetchMarkets": {"types": ["spot"]}, "fetchCurrencies": false}
+        }
+    }
+}
