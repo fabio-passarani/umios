@@ -23,6 +23,8 @@ log = get_logger("monitor")
 SERVICE = "monitor"
 #: A service that steps hourly must have been seen within this many hours.
 MAX_HEARTBEAT_AGE_HOURS = 3.0
+#: Services with their own rhythm: backups are daily, the Freqtrade bot beats every minute.
+HEARTBEAT_LIMITS = {"backup": 26.0, "freqtrade": 0.5}
 
 
 class Monitor:
@@ -54,6 +56,7 @@ class Monitor:
                 self.kill_switch,
                 now,
                 max_heartbeat_age_hours=MAX_HEARTBEAT_AGE_HOURS,
+                heartbeat_limits=HEARTBEAT_LIMITS,
             )
             if c.name != f"service:{SERVICE}"  # the monitor does not vouch for itself
         ]

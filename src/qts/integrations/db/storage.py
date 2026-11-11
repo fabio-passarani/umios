@@ -513,6 +513,15 @@ class Storage:
         with self.session() as s:
             s.merge(Heartbeat(service=service, ts=_now(), status=status, detail=detail[:500]))
 
+    def forget_heartbeat(self, service: str) -> bool:
+        """Stop watching a service that was retired on purpose. True if it was known."""
+        with self.session() as s:
+            row = s.get(Heartbeat, service)
+            if row is None:
+                return False
+            s.delete(row)
+            return True
+
     def heartbeats(self) -> list[Heartbeat]:
         with self.session() as s:
             return list(s.scalars(select(Heartbeat)).all())

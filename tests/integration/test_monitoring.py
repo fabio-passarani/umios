@@ -239,3 +239,35 @@ def test_cli_import_csv_report_and_soak(tmp_path: Path, monkeypatch: pytest.Monk
         == 1
     )
     assert runner.invoke(app, ["monitor", "once", "-c", "cfg.yaml"]).exit_code in (0, 1)
+
+
+def test_services_have_their_own_heartbeat_limits_and_can_be_retired(
+    storage: Storage,
+    paper_config: AppConfig,
+    candles: pd.DataFrame,
+    parquet: ParquetStore,
+    tmp_path: Path,
+) -> None:
+    session(storage, paper_config, candles, parquet, tmp_path)
+    monitor = Monitor(paper_config, storage, parquet, KillSwitch(tmp_path / "kill.json"))
+    now = datetime.now(tz=UTC)
+    for service in ("backup", "freqtrade", "paper-trader"):
+        storage.heartbeat(service, "ok", "test")
+
+    def verdicts(at: datetime) -> dict[str, bool]:
+        return {c.name: c.ok for c in monitor.cycle(at) if c.name.startswith("service:")}
+
+    assert verdicts(now + timedelta(minutes=10)) == {
+        "service:backup": True,
+        "service:freqtrade": True,
+        "service:paper-trader": True,
+    }
+    later = verdicts(now + timedelta(hours=5))
+    assert later["service:backup"] is True  # daily: five hours of silence is normal
+    assert later["service:freqtrade"] is False  # beats every minute: this is an outage
+    assert later["service:paper-trader"] is False  # steps hourly
+    assert verdicts(now + timedelta(hours=30))["service:backup"] is False  # a missed backup
+
+    assert storage.forget_heartbeat("freqtrade") is True  # switched off on purpose
+    assert "service:freqtrade" not in verdicts(now + timedelta(hours=5))
+    assert storage.forget_heartbeat("freqtrade") is False

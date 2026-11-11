@@ -539,6 +539,24 @@ def monitor_once(
         raise typer.Exit(code=1)
 
 
+@monitor_app.command("forget")
+@_guard
+def monitor_forget(
+    service: Annotated[str, typer.Argument(help="Service name as shown by `qts health`")],
+    config: ConfigOption = None,
+) -> None:
+    """Stop watching a service you switched off on purpose (e.g. `freqtrade`).
+
+    A service that has reported once is expected to keep reporting: without
+    this, stopping it deliberately would count as an outage for ever. It is
+    watched again as soon as it reports.
+    """
+    rt = Runtime(config)
+    known = rt.storage.forget_heartbeat(service)
+    rt.storage.record_event("warning", "monitor", f"service {service} no longer watched (operator)")
+    typer.echo(f"{service}: {'no longer watched' if known else 'was not being watched'}")
+
+
 @monitor_app.command("run")
 @_guard
 def monitor_run(
