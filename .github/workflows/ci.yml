@@ -98,8 +98,10 @@ jobs:
           assert pathlib.Path('/freqtrade/user_data/strategies/qts_trend_following.py').is_file()"
       - name: Start the stack, check schema version, database roles, kill switch and dashboard
         run: scripts/smoke_test.sh
-      - name: Take a backup and prove it can be restored
-        run: scripts/restore_test.sh
+      - name: Take a backup and prove it can be restored (as an unprivileged host user)
+        run: |
+          test "$(id -u)" != 0
+          scripts/restore_test.sh
       - if: always()
         run: docker compose --profile freqtrade down -v
 

@@ -32,6 +32,13 @@ if [ -d /state ]; then
     mv "$state.tmp" "$state"
 fi
 
+# This script runs as root inside the container. Hand the files to whoever owns
+# ./backups on the host, so the operator can read, copy and restore them without
+# sudo; they stay private to that user (mode 600).
+owner="$(stat -c '%u:%g' /backups)"
+chown "$owner" "$dump" || fail "cannot hand the dump over to $owner"
+[ ! -f "$state" ] || chown "$owner" "$state" || fail "cannot hand the state archive over to $owner"
+
 ls -1t /backups/qts-2*.sql.gz 2>/dev/null | tail -n +"$((keep + 1))" | xargs -r rm --
 ls -1t /backups/qts-state-*.tar.gz 2>/dev/null | tail -n +"$((keep + 1))" | xargs -r rm --
 
