@@ -2,7 +2,7 @@
 
 - **Date:** 2026-11-11
 - **Starting point:** commit `eb6fd9a` (independent audit and its fixes), now also `main` and `develop`
-- **Work:** four pull requests, 15 commits, about 80 files, about 6 900 lines added
+- **Work:** four pull requests, 16 commits, 77 files, about 6 700 lines added
 - **Rule kept throughout:** no live trading, no real money, no real credentials, strategy and
   parameters untouched
 
