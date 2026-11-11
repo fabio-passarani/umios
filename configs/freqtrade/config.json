@@ -9,7 +9,6 @@
     "stake_currency": "USDT",
     "stake_amount": "unlimited",
     "tradable_balance_ratio": 0.99,
-    "fiat_display_currency": "EUR",
     "timeframe": "1d",
     "cancel_open_orders_on_exit": false,
     "strategy": "QtsTrendFollowing",
@@ -70,5 +69,6 @@
     "force_entry_enable": false,
     "internals": {
         "process_throttle_secs": 60
-    }
+    },
+    "initial_state": "running"
 }
