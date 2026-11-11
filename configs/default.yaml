@@ -14,7 +14,9 @@ market:
 data:
   directory: data
   start: "2018-01-01"
-  end: null               # null = up to the last closed candle
+  # Pinned on purpose: with an open end the same command gives a different
+  # result every day. Move it forward deliberately, and say so in the results.
+  end: "2026-11-09"
 
 strategy:
   name: trend_following
@@ -57,6 +59,9 @@ risk:                     # hard limits of the independent risk engine
 
 validation:
   out_of_sample_fraction: 0.3
+  # Fixed boundary (it is where the 30% fraction fell when the period was pinned).
+  # Everything from this day on was never used to choose anything.
+  out_of_sample_start: "2024-03-14"
   walk_forward_train_days: 730
   walk_forward_test_days: 180
   monte_carlo_simulations: 2000

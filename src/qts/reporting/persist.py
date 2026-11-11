@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 
 from qts.backtesting.engine import BacktestResult
@@ -13,8 +15,9 @@ def save_backtest(
     result: BacktestResult,
     metrics: dict[str, float],
     benchmark: pd.Series | None = None,
+    provenance: dict[str, Any] | None = None,
 ) -> str:
-    """Persist a backtest run with everything needed to chart and audit it."""
+    """Persist a backtest run with everything needed to chart, audit and re-run it."""
     run_id = storage.create_run(
         kind="backtest",
         mode="backtest",
@@ -22,6 +25,7 @@ def save_backtest(
         config=result.config,
         fingerprint=result.config_fingerprint,
         initial_capital=result.initial_capital,
+        provenance=provenance,
     )
     storage.append_equity(
         run_id, result.equity, result.cash, result.exposure, result.initial_capital, benchmark

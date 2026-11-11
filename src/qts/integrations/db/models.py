@@ -33,6 +33,7 @@ class Run(Base):
     config_fingerprint: Mapped[str] = mapped_column(String(32))
     config: Mapped[dict[str, Any]] = mapped_column(JSON)
     metrics: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    provenance: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     initial_capital: Mapped[float] = mapped_column(Float)
     started_at: Mapped[datetime] = mapped_column(TS)
     finished_at: Mapped[datetime | None] = mapped_column(TS, nullable=True)

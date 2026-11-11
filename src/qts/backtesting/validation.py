@@ -29,10 +29,24 @@ from qts.strategies import TrendFollowingStrategy
 
 
 # ------------------------------------------------------------- in / out of sample
-def split_point(index: pd.DatetimeIndex, out_of_sample_fraction: float) -> pd.Timestamp:
-    """First timestamp of the out-of-sample segment (chronological split, no shuffle)."""
+def split_point(
+    index: pd.DatetimeIndex, out_of_sample_fraction: float, out_of_sample_start: str | None = None
+) -> pd.Timestamp:
+    """First timestamp of the out-of-sample segment (chronological split, no shuffle).
+
+    A configured ``out_of_sample_start`` wins: the boundary is then a fixed
+    date. The fraction is the fallback and moves whenever the data grows.
+    """
     if len(index) < 10:
         raise DataError("not enough bars to split in/out of sample")
+    if out_of_sample_start is not None:
+        boundary = pd.Timestamp(out_of_sample_start, tz="UTC")
+        after = index[index >= boundary]
+        if len(after) == 0 or len(after) == len(index):
+            raise DataError(
+                f"out_of_sample_start {out_of_sample_start} leaves one of the two samples empty"
+            )
+        return pd.Timestamp(after[0])
     position = int(len(index) * (1.0 - out_of_sample_fraction))
     return index[min(max(position, 1), len(index) - 1)]
 
@@ -281,7 +295,9 @@ class ValidationReport:
 def run_validation(config: AppConfig, data: dict[str, pd.DataFrame]) -> ValidationReport:
     """Run the whole pipeline and attach plain-language warnings."""
     index = common_index(data)
-    split = split_point(index, config.validation.out_of_sample_fraction)
+    split = split_point(
+        index, config.validation.out_of_sample_fraction, config.validation.out_of_sample_start
+    )
     full = evaluate_period(config, data, "full")
     in_sample = evaluate_period(config, data, "in_sample", end=split - pd.Timedelta(days=1))
     out_sample = evaluate_period(config, data, "out_of_sample", start=split)

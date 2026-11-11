@@ -213,6 +213,7 @@ class Storage:
         config: dict[str, Any],
         fingerprint: str,
         initial_capital: float,
+        provenance: dict[str, Any] | None = None,
     ) -> str:
         run_id = uuid4().hex
         with self.session() as s:
@@ -226,6 +227,7 @@ class Storage:
                     config_fingerprint=fingerprint,
                     config=config,
                     initial_capital=initial_capital,
+                    provenance=provenance,
                     started_at=_now(),
                 )
             )
