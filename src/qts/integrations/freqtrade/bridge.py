@@ -9,6 +9,7 @@ has not approved.
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 
 from qts.core.config import AppConfig, Settings, load_config
+from qts.core.errors import LiveTradingDisabledError
 from qts.core.logging import configure_logging, get_logger
 from qts.core.types import Order, OrderReason, Side, TradingMode
 from qts.portfolio.sizing import PositionSizer
@@ -50,7 +52,11 @@ class FreqtradeBridge:
     """Holds the platform strategy, sizer and risk engine for one Freqtrade bot."""
 
     def __init__(
-        self, config: AppConfig, mode: TradingMode, kill_switch: KillSwitch | None = None
+        self,
+        config: AppConfig,
+        mode: TradingMode,
+        kill_switch: KillSwitch | None = None,
+        state_path: Path | None = None,
     ) -> None:
         self.config = config
         self.mode = mode
@@ -58,6 +64,43 @@ class FreqtradeBridge:
         self.sizer = PositionSizer(config.portfolio.sizing)
         self.risk = RiskEngine(config.risk, mode, kill_switch=kill_switch)
         self._bar = timedelta(days=1)
+        self._state_path = state_path
+        self._saved: str | None = None
+        self._restore_risk_state()
+
+    # ------------------------------------------------------------ risk state
+    def _restore_risk_state(self) -> None:
+        """Reload the circuit-breaker state saved by the previous bot process.
+
+        Without it a restart would forget the equity peak, the daily loss halt
+        and the day's order count — i.e. restarting the bot would be a way to
+        reset the drawdown limit. An unreadable file is an anomaly: fail closed.
+        """
+        if self._state_path is None or not self._state_path.is_file():
+            return
+        try:
+            state = json.loads(self._state_path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                raise TypeError("risk state must be a mapping")
+            self.risk.restore(state)
+            self._saved = json.dumps(state, sort_keys=True)
+        except (OSError, ValueError, TypeError) as exc:
+            log.error("risk_state_unreadable", error=type(exc).__name__)
+            self.risk.kill_switch.activate(
+                "freqtrade risk state file is unreadable", source="system"
+            )
+
+    def _save_risk_state(self) -> None:
+        if self._state_path is None:
+            return
+        payload = json.dumps(self.risk.snapshot(), sort_keys=True)
+        if payload == self._saved:
+            return
+        self._state_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._state_path.with_suffix(".tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, self._state_path)
+        self._saved = payload
 
     @classmethod
     def from_environment(cls, runmode: str, dry_run: bool) -> FreqtradeBridge:
@@ -66,12 +109,24 @@ class FreqtradeBridge:
         configure_logging(settings.log_level, settings.log_json)
         config = load_config(os.environ.get("QTS_CONFIG_FILE", str(settings.config_file)))
         mode = resolve_mode(runmode, dry_run)
-        # Backtests must not read or trip the operator's persistent kill switch.
-        path: Path | None = (
-            settings.state_dir / "kill_switch.json" if mode is not TradingMode.BACKTEST else None
+        if mode is TradingMode.LIVE:
+            # Refuse to start at all. The risk engine would veto every entry in
+            # LIVE mode anyway, but a bot that is up and connected with real keys
+            # could still manage exits; there must be no such bot.
+            raise LiveTradingDisabledError(
+                f"Freqtrade was started for real trading (runmode={runmode!r}, "
+                f"dry_run={dry_run}): live trading is not implemented in this version. "
+                "Use `freqtrade trade --dry-run` or backtesting."
+            )
+        # Backtests must not read or trip the operator's persistent kill switch,
+        # nor inherit the live circuit-breaker state.
+        paper = mode is TradingMode.PAPER
+        kill_path: Path | None = settings.state_dir / "kill_switch.json" if paper else None
+        state_path: Path | None = (
+            settings.state_dir / "freqtrade_risk_state.json" if paper else None
         )
         log.info("bridge_ready", mode=mode.value, fingerprint=config.fingerprint())
-        return cls(config, mode, KillSwitch(path))
+        return cls(config, mode, KillSwitch(kill_path), state_path)
 
     @property
     def startup_candles(self) -> int:
@@ -102,6 +157,7 @@ class FreqtradeBridge:
     def on_equity(self, now: datetime, equity: float) -> None:
         """Feed account equity to the circuit breakers (daily loss, drawdown)."""
         self.risk.on_equity_update(now, equity)
+        self._save_risk_state()
 
     def approve_entry(
         self,
@@ -134,4 +190,6 @@ class FreqtradeBridge:
             data_time=min(last_candle_open + self._bar, now),
             cost_rate=self.config.costs.cost_rate,
         )
-        return self.risk.evaluate(order, context).approved
+        approved = self.risk.evaluate(order, context).approved
+        self._save_risk_state()
+        return approved

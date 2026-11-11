@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from qts.core.config import AppConfig
+from qts.core.errors import LiveTradingDisabledError
 from qts.core.types import TradingMode
 from qts.integrations.freqtrade.bridge import FreqtradeBridge, resolve_mode
 from qts.risk.kill_switch import KillSwitch
@@ -100,6 +101,63 @@ def test_bridge_in_live_mode_rejects_every_entry(config: AppConfig) -> None:
     )
 
 
+@pytest.mark.parametrize(("runmode", "dry_run"), [("live", False), ("dry_run", False), ("x", True)])
+def test_bridge_refuses_to_start_for_real_trading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runmode: str, dry_run: bool
+) -> None:
+    monkeypatch.setenv("QTS_CONFIG_FILE", str(ROOT / "configs" / "paper.yaml"))
+    monkeypatch.setenv("QTS_STATE_DIR", str(tmp_path))
+    with pytest.raises(LiveTradingDisabledError):
+        FreqtradeBridge.from_environment(runmode, dry_run)
+    # even the double opt-in of the platform does not open the door
+    monkeypatch.setenv("QTS_ENABLE_LIVE_TRADING", "true")
+    monkeypatch.setenv("QTS_LIVE_TRADING_CONFIRMATION", "I-ACCEPT-REAL-MONEY-RISK")
+    with pytest.raises(LiveTradingDisabledError):
+        FreqtradeBridge.from_environment(runmode, dry_run)
+
+
+def _entry(bridge: FreqtradeBridge, now: datetime, cash: float = 10_000.0) -> bool:
+    return bridge.approve_entry(
+        pair=SYMBOL,
+        amount=1.0,
+        rate=100.0,
+        stop_distance=10.0,
+        now=now,
+        cash=cash,
+        positions={},
+        prices={SYMBOL: 100.0},
+        last_candle_open=now - timedelta(days=1),
+    )
+
+
+def test_bot_restart_does_not_reset_the_circuit_breakers(config: AppConfig, tmp_path: Path) -> None:
+    """Drawdown peak and daily halt live in a state file next to the kill switch."""
+    state = tmp_path / "freqtrade_risk_state.json"
+    now = pd.Timestamp("2024-01-10", tz="UTC").to_pydatetime()
+
+    first = FreqtradeBridge(config, TradingMode.PAPER, KillSwitch(), state)
+    first.on_equity(now - timedelta(days=1), 10_000.0)
+    first.on_equity(now, 9_300.0)  # -7% in a day: entries halted
+    assert first.risk.daily_halt
+    assert not _entry(first, now, cash=9_300.0)
+
+    restarted = FreqtradeBridge(config, TradingMode.PAPER, KillSwitch(), state)
+    assert restarted.risk.daily_halt
+    assert restarted.risk.drawdown == pytest.approx(0.07)
+    assert not _entry(restarted, now, cash=9_300.0)
+
+    fresh = FreqtradeBridge(config, TradingMode.PAPER, KillSwitch())  # no state file: forgets
+    assert _entry(fresh, now, cash=9_300.0)
+
+
+def test_unreadable_risk_state_fails_closed(config: AppConfig, tmp_path: Path) -> None:
+    state = tmp_path / "freqtrade_risk_state.json"
+    state.write_text("{broken")
+    bridge = FreqtradeBridge(config, TradingMode.PAPER, KillSwitch(), state)
+    assert bridge.risk.kill_switch.active
+    assert not _entry(bridge, pd.Timestamp("2024-01-10", tz="UTC").to_pydatetime())
+
+
 def test_core_package_never_imports_freqtrade() -> None:
     """GPL isolation: only the adapter file under freqtrade/ may import freqtrade."""
     offenders = [
@@ -147,7 +205,10 @@ def test_adapter_strategy_produces_platform_signals(
     assert (out["exit_long"] == 1).tolist() == out["qts_exit"].tolist()
     assert out["qts_entry"].sum() > 0
 
-    live = module.QtsTrendFollowing(
-        {"runmode": RunMode.LIVE, "dry_run": False, "stake_currency": "USDT"}
-    )
-    assert live.bridge.mode is TradingMode.LIVE  # the risk engine will veto everything
+    # Real trading: the strategy refuses to load, so the bot cannot start at all.
+    for live_config in (
+        {"runmode": RunMode.LIVE, "dry_run": False, "stake_currency": "USDT"},
+        {"runmode": RunMode.DRY_RUN, "dry_run": False, "stake_currency": "USDT"},
+    ):
+        with pytest.raises(LiveTradingDisabledError, match="live trading is not implemented"):
+            module.QtsTrendFollowing(live_config)
