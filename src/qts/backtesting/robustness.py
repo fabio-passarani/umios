@@ -25,6 +25,7 @@ from qts.backtesting.benchmark import buy_and_hold
 from qts.backtesting.engine import BacktestResult, run_backtest
 from qts.backtesting.metrics import PERIODS_PER_YEAR, compute_metrics, max_drawdown
 from qts.core.config import AppConfig
+from qts.market_data.schema import bars_per_day
 
 #: Regime definition, fixed a priori: trailing 90-day return of the equal-weight
 #: universe above +20% is a bull market, below -20% a bear market, else sideways.
@@ -58,8 +59,8 @@ class RobustnessReport:
 
 
 # ------------------------------------------------------------------------ helpers
-def _row(result: BacktestResult, capital: float) -> dict[str, float]:
-    m = compute_metrics(result.equity, capital, result.trades, result.exposure)
+def _row(result: BacktestResult, capital: float, periods: int) -> dict[str, float]:
+    m = compute_metrics(result.equity, capital, result.trades, result.exposure, periods)
     return {
         "total_return": m["total_return"],
         "cagr": m["cagr"],
@@ -103,7 +104,13 @@ def cost_sensitivity(
         if cfg is None:
             continue
         result = run_backtest(cfg, data, signals=signals)
-        rows.append({"fee_rate": fee, "slippage_bps": slippage, **_row(result, capital)})
+        rows.append(
+            {
+                "fee_rate": fee,
+                "slippage_bps": slippage,
+                **_row(result, capital, config.periods_per_year),
+            }
+        )
     return rows
 
 
@@ -114,7 +121,7 @@ def parameter_sensitivity(
     """Move one parameter at a time by ±20% and look at the neighbourhood."""
     capital = config.portfolio.initial_capital
     params = config.strategy.params.model_dump()
-    base = _row(run_backtest(config, data), capital)
+    base = _row(run_backtest(config, data), capital, config.periods_per_year)
     rows: list[dict[str, Any]] = [{"parameter": "(default)", "value": None, **base}]
     for name in SHOCKED_PARAMETERS:
         for shock in PARAMETER_SHOCKS:
@@ -128,7 +135,11 @@ def parameter_sensitivity(
             if cfg is None:
                 continue
             rows.append(
-                {"parameter": name, "value": value, **_row(run_backtest(cfg, data), capital)}
+                {
+                    "parameter": name,
+                    "value": value,
+                    **_row(run_backtest(cfg, data), capital, config.periods_per_year),
+                }
             )
     shocked = rows[1:]
     sharpes = np.array([r["sharpe"] for r in shocked]) if shocked else np.array([base["sharpe"]])
@@ -150,15 +161,16 @@ def parameter_sensitivity(
 
 # ----------------------------------------------------------------------- regimes
 def market_index(data: dict[str, pd.DataFrame]) -> pd.Series:
-    """Equal-weight daily return of the universe (assets not yet listed are skipped)."""
+    """Equal-weight per-candle return of the universe (assets not yet listed are skipped)."""
     closes = pd.concat({s: f["close"] for s, f in data.items()}, axis=1).sort_index()
     return closes.pct_change().mean(axis=1, skipna=True).fillna(0.0)
 
 
-def regime_labels(data: dict[str, pd.DataFrame]) -> pd.Series:
-    """Label each day bull / bear / sideways from the *trailing* window (no look-ahead)."""
+def regime_labels(data: dict[str, pd.DataFrame], bars_in_a_day: int = 1) -> pd.Series:
+    """Label each candle bull / bear / sideways from the *trailing* window (no
+    look-ahead). The window is :data:`REGIME_WINDOW` days whatever the timeframe."""
     growth = (1.0 + market_index(data)).cumprod()
-    trailing = growth / growth.shift(REGIME_WINDOW) - 1.0
+    trailing = growth / growth.shift(REGIME_WINDOW * bars_in_a_day) - 1.0
     labels = pd.Series("sideways", index=growth.index)
     labels[trailing > REGIME_THRESHOLD] = "bull"
     labels[trailing < -REGIME_THRESHOLD] = "bear"
@@ -167,9 +179,12 @@ def regime_labels(data: dict[str, pd.DataFrame]) -> pd.Series:
 
 
 def regime_breakdown(
-    result: BacktestResult, benchmark: pd.Series, data: dict[str, pd.DataFrame]
+    result: BacktestResult,
+    benchmark: pd.Series,
+    data: dict[str, pd.DataFrame],
+    bars_in_a_day: int = 1,
 ) -> list[dict[str, Any]]:
-    labels = regime_labels(data).reindex(result.equity.index).fillna("warm-up")
+    labels = regime_labels(data, bars_in_a_day).reindex(result.equity.index).fillna("warm-up")
     strategy = result.returns
     bench = benchmark.reindex(result.equity.index).ffill()
     bench_returns = bench.pct_change()
@@ -277,7 +292,7 @@ def _longest_run(flags: np.ndarray[Any, Any]) -> int:
 
 
 # ------------------------------------------------------------------ significance
-def sharpe_statistics(returns: pd.Series) -> dict[str, float]:
+def sharpe_statistics(returns: pd.Series, periods: int = PERIODS_PER_YEAR) -> dict[str, float]:
     """Annualised Sharpe with its standard error (Lo, 2002, adjusted for skew and
     kurtosis as in Bailey & López de Prado) and the probability that the true
     Sharpe is above zero."""
@@ -297,7 +312,7 @@ def sharpe_statistics(returns: pd.Series) -> dict[str, float]:
     skew, kurtosis = float((centred**3).mean()), float((centred**4).mean())
     variance = (1.0 - skew * daily + (kurtosis - 1.0) / 4.0 * daily**2) / (n - 1)
     error = math.sqrt(max(variance, 0.0))
-    scale = math.sqrt(PERIODS_PER_YEAR)
+    scale = math.sqrt(periods)
     return {
         "sharpe": daily * scale,
         "std_error": error * scale,
@@ -344,11 +359,11 @@ def significance(
     trials = int(np.prod([len(v) for v in config.validation.parameter_grid.values()] or [1]))
     return {
         "full": {
-            **sharpe_statistics(full.returns),
+            **sharpe_statistics(full.returns, config.periods_per_year),
             **trade_significance([t.return_pct for t in full.trades], seed),
         },
         "out_of_sample": {
-            **sharpe_statistics(out_of_sample.returns),
+            **sharpe_statistics(out_of_sample.returns, config.periods_per_year),
             **trade_significance([t.return_pct for t in out_of_sample.trades], seed),
         },
         "declared_trials": trials,
@@ -368,7 +383,7 @@ def run_robustness(
     )
     parameters, summary = parameter_sensitivity(config, data)
     stats = significance(config, full, out_of_sample)
-    correlation = asset_correlation(data)
+    correlation = asset_correlation(data, 90 * bars_per_day(config.market.timeframe))
     exposure = exposure_profile(full)
 
     notes: list[str] = []
@@ -417,7 +432,7 @@ def run_robustness(
         cost_sensitivity=costs,
         parameter_sensitivity=parameters,
         parameter_summary=summary,
-        regimes=regime_breakdown(full, benchmark, data),
+        regimes=regime_breakdown(full, benchmark, data, bars_per_day(config.market.timeframe)),
         yearly=yearly_breakdown(full, benchmark),
         correlation=correlation,
         exposure=exposure,

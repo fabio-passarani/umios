@@ -35,6 +35,7 @@ from qts.market_data.schema import check_quality
 from qts.market_data.service import load_universe, update_history
 from qts.market_data.sources import BinanceVisionSource
 from qts.market_data.store import ParquetStore
+from qts.market_data.universe import classify, download_universe
 from qts.monitoring.daily import build_daily_report, render_daily_report, soak_status
 from qts.monitoring.health import run_health_checks
 from qts.monitoring.monitor import Monitor
@@ -49,12 +50,14 @@ risk_app = typer.Typer(no_args_is_help=True, help="Risk engine and kill switch")
 db_app = typer.Typer(no_args_is_help=True, help="Operational database")
 monitor_app = typer.Typer(no_args_is_help=True, help="Health monitoring service")
 report_app = typer.Typer(no_args_is_help=True, help="Daily and soak-test reports")
+universe_app = typer.Typer(no_args_is_help=True, help="Research universe (incl. delisted assets)")
 app.add_typer(data_app, name="data")
 app.add_typer(paper_app, name="paper")
 app.add_typer(risk_app, name="risk")
 app.add_typer(db_app, name="db")
 app.add_typer(monitor_app, name="monitor")
 app.add_typer(report_app, name="report")
+app.add_typer(universe_app, name="universe")
 
 log = get_logger("cli")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -136,12 +139,15 @@ def backtest(
     bench = buy_and_hold(
         data, capital, rt.config.costs, result.equity.index[0], result.equity.index[-1]
     )
-    metrics = compute_metrics(result.equity, capital, result.trades, result.exposure)
+    periods = rt.config.periods_per_year
+    metrics = compute_metrics(result.equity, capital, result.trades, result.exposure, periods)
     typer.echo(
         f"Backtest {result.metadata['start'][:10]} -> {result.metadata['end'][:10]}  "
         f"config {result.config_fingerprint}"
     )
-    _print_metrics({"Strategy": metrics, "Buy & Hold": compute_metrics(bench, capital)})
+    _print_metrics(
+        {"Strategy": metrics, "Buy & Hold": compute_metrics(bench, capital, periods=periods)}
+    )
     rejected = sum(1 for d in result.decisions if not d.approved)
     typer.echo(
         f"Risk engine: {len(result.decisions)} orders evaluated, {rejected} rejected; "
@@ -225,7 +231,11 @@ def reproduce(
         typer.echo(f"{name:20} stored {before!s:18} now {after!s:18} {verdict}")
     stored_metrics = run.metrics or {}
     metrics = compute_metrics(
-        result.equity, original.portfolio.initial_capital, result.trades, result.exposure
+        result.equity,
+        original.portfolio.initial_capital,
+        result.trades,
+        result.exposure,
+        original.periods_per_year,
     )
     for key in ("total_return", "sharpe", "max_drawdown", "trades"):
         typer.echo(f"{key:20} stored {stored_metrics.get(key)!s:18} now {metrics[key]!s:18}")
@@ -517,6 +527,59 @@ def risk_reset(
             rt.storage.save_paper_state(run.id, state)
     rt.storage.record_event("warning", "risk", f"kill switch reset by {operator}")
     typer.echo("Kill switch reset.")
+
+
+# ----------------------------------------------------------------------- universe
+@universe_app.command("list")
+@_guard
+def universe_list(config: ConfigOption = None) -> None:
+    """Every pair the archive ever listed for the quote currency, with exclusions."""
+    rt = Runtime(config)
+    symbols = BinanceVisionSource().list_symbols(rt.config.market.quote_currency)
+    reasons: dict[str, list[str]] = {}
+    for symbol in symbols:
+        reasons.setdefault(classify(symbol) or "eligible", []).append(symbol)
+    typer.echo(f"{len(symbols)} {rt.config.market.quote_currency} pairs ever listed")
+    for reason, members in sorted(reasons.items(), key=lambda item: -len(item[1])):
+        typer.echo(f"  {len(members):4d}  {reason}")
+
+
+@universe_app.command("download")
+@_guard
+def universe_download(
+    config: ConfigOption = None,
+    timeframe: Annotated[str, typer.Option(help="1d, 4h or 1h")] = "1d",
+    workers: Annotated[int, typer.Option(min=1, max=32)] = 8,
+    symbol: Annotated[
+        list[str] | None, typer.Option(help="Only these symbols (default: all eligible)")
+    ] = None,
+) -> None:
+    """Download the history of the whole universe, delisted assets included.
+
+    Resumable: what is already stored is not fetched again. Symbols that fail
+    the quality checks are reported and left out, they do not stop the run.
+    """
+    rt = Runtime(config)
+    source = BinanceVisionSource()
+    wanted = symbol or [
+        s for s in source.list_symbols(rt.config.market.quote_currency) if classify(s) is None
+    ]
+    end = (
+        date.fromisoformat(rt.config.data.end)
+        if rt.config.data.end
+        else (datetime.now(tz=UTC) - timedelta(days=1)).date()
+    )
+    results = download_universe(
+        source, rt.store, rt.config.market.exchange, wanted, timeframe, end, workers
+    )
+    failed = [r for r in results if r.error]
+    rows = sum(r.rows for r in results)
+    typer.echo(
+        f"{len(results) - len(failed)} symbols stored ({rows:,} {timeframe} candles), "
+        f"{len(failed)} failed"
+    )
+    for r in failed:
+        typer.echo(f"  {r.symbol}: {r.error}")
 
 
 # ------------------------------------------------------------------------ monitor

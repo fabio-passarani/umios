@@ -27,7 +27,7 @@ from pathlib import Path
 import pandas as pd
 
 from qts.core.config import AppConfig, Settings, load_config
-from qts.core.errors import LiveTradingDisabledError, QtsError
+from qts.core.errors import ConfigError, LiveTradingDisabledError, QtsError
 from qts.core.logging import configure_logging, get_logger
 from qts.core.types import Order, OrderReason, Side, TradingMode
 from qts.portfolio.sizing import PositionSizer
@@ -107,6 +107,13 @@ class FreqtradeBridge:
         self._last_beat: datetime | None = None
         journal = RiskJournal(sinks=[self._record_decision], event_sinks=[self._record_event])
         self.risk = RiskEngine(config.risk, mode, kill_switch=kill_switch, journal=journal)
+        if config.market.timeframe != "1d":
+            # The adapter strategy declares daily candles to Freqtrade and reasons
+            # in whole days; running it on another timeframe would silently
+            # mis-align signals and stops.
+            raise ConfigError(
+                f"the Freqtrade adapter supports daily candles only, not {config.market.timeframe}"
+            )
         self._bar = timedelta(days=1)
         self._state_path = state_path
         self._saved: str | None = None

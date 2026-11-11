@@ -21,11 +21,17 @@ import pandas as pd
 
 from qts.backtesting.benchmark import buy_and_hold
 from qts.backtesting.engine import BacktestResult, provenance_of, run_backtest
-from qts.backtesting.metrics import compute_metrics, max_drawdown, sharpe_ratio
+from qts.backtesting.metrics import (
+    PERIODS_PER_YEAR,
+    compute_metrics,
+    max_drawdown,
+    sharpe_ratio,
+)
 from qts.backtesting.robustness import RobustnessReport, run_robustness
 from qts.core.config import AppConfig
 from qts.core.errors import DataError
 from qts.core.types import Trade
+from qts.market_data.schema import bars_per_day
 from qts.strategies import TrendFollowingStrategy
 
 
@@ -86,8 +92,10 @@ def evaluate_period(
         label=label,
         start=first,
         end=last,
-        strategy=compute_metrics(result.equity, capital, result.trades, result.exposure),
-        benchmark=compute_metrics(bench, capital),
+        strategy=compute_metrics(
+            result.equity, capital, result.trades, result.exposure, config.periods_per_year
+        ),
+        benchmark=compute_metrics(bench, capital, periods=config.periods_per_year),
         result=result,
         benchmark_equity=bench,
     )
@@ -161,7 +169,8 @@ def walk_forward(config: AppConfig, data: dict[str, pd.DataFrame]) -> WalkForwar
     train_sharpes: list[float] = []
     oos_trades: list[Trade] = []
     cursor = index[0]
-    one_bar = pd.Timedelta(days=1)
+    one_bar = config.bar
+    periods = config.periods_per_year
     while cursor + train + one_bar <= index[-1]:
         train_start, train_end = cursor, cursor + train - one_bar
         test_start = cursor + train
@@ -169,7 +178,7 @@ def walk_forward(config: AppConfig, data: dict[str, pd.DataFrame]) -> WalkForwar
         best: tuple[float, int] | None = None
         for i, (_combo, cfg) in enumerate(candidates):
             run = run_backtest(cfg, data, start=train_start, end=train_end, signals=signal_cache[i])
-            score = sharpe_ratio(run.returns)
+            score = sharpe_ratio(run.returns, periods)
             if best is None or score > best[0]:
                 best = (score, i)
         assert best is not None
@@ -189,7 +198,7 @@ def walk_forward(config: AppConfig, data: dict[str, pd.DataFrame]) -> WalkForwar
                 test_end=oos.equity.index[-1],
                 chosen_params=candidates[chosen][0],
                 train_sharpe=best[0],
-                test_sharpe=sharpe_ratio(oos.returns),
+                test_sharpe=sharpe_ratio(oos.returns, periods),
                 test_return=float(oos.equity.iloc[-1] / oos.initial_capital - 1.0),
                 test_trades=len(oos.trades),
             )
@@ -205,14 +214,14 @@ def walk_forward(config: AppConfig, data: dict[str, pd.DataFrame]) -> WalkForwar
     capital = config.portfolio.initial_capital
     oos_equity = capital * (1.0 + oos_returns).cumprod()
     bench = buy_and_hold(data, capital, config.costs, oos_returns.index[0], oos_returns.index[-1])
-    oos_metrics = compute_metrics(oos_equity, capital, oos_trades)
+    oos_metrics = compute_metrics(oos_equity, capital, oos_trades, periods=periods)
     mean_train = float(np.mean(train_sharpes))
     efficiency = oos_metrics["sharpe"] / mean_train if mean_train > 0 else 0.0
     return WalkForwardReport(
         windows=windows,
         oos_returns=oos_returns,
         oos_metrics=oos_metrics,
-        benchmark_metrics=compute_metrics(bench, capital),
+        benchmark_metrics=compute_metrics(bench, capital, periods=periods),
         efficiency=float(efficiency),
         grid=dict(v.parameter_grid),
     )
@@ -237,7 +246,11 @@ def _percentiles(values: np.ndarray[Any, Any]) -> dict[str, float]:
 
 
 def monte_carlo(
-    returns: pd.Series, simulations: int, seed: int, block_size: int = 20
+    returns: pd.Series,
+    simulations: int,
+    seed: int,
+    block_size: int = 20,
+    periods: int = PERIODS_PER_YEAR,
 ) -> MonteCarloReport:
     """Stationary block bootstrap of daily returns.
 
@@ -260,7 +273,7 @@ def monte_carlo(
     sampled = values[idx]
     std = sampled.std(axis=1, ddof=1)
     sharpes = np.divide(sampled.mean(axis=1), std, out=np.zeros(simulations), where=std > 0)
-    sharpes = sharpes * np.sqrt(365)
+    sharpes = sharpes * np.sqrt(periods)
     equity = (1.0 + returns).cumprod()
     return MonteCarloReport(
         simulations=simulations,
@@ -273,7 +286,7 @@ def monte_carlo(
         observed={
             "total_return": float(equity.iloc[-1] - 1.0),
             "max_drawdown": max_drawdown(pd.concat([pd.Series([1.0]), equity], ignore_index=True)),
-            "sharpe": sharpe_ratio(returns),
+            "sharpe": sharpe_ratio(returns, periods),
         },
     )
 
@@ -305,11 +318,16 @@ def run_validation(
         index, config.validation.out_of_sample_fraction, config.validation.out_of_sample_start
     )
     full = evaluate_period(config, data, "full")
-    in_sample = evaluate_period(config, data, "in_sample", end=split - pd.Timedelta(days=1))
+    in_sample = evaluate_period(config, data, "in_sample", end=split - config.bar)
     out_sample = evaluate_period(config, data, "out_of_sample", start=split)
     wf = walk_forward(config, data)
     mc = monte_carlo(
-        full.result.returns, config.validation.monte_carlo_simulations, config.validation.seed
+        full.result.returns,
+        config.validation.monte_carlo_simulations,
+        config.validation.seed,
+        # blocks of 20 days whatever the timeframe, so the same clustering survives
+        block_size=20 * bars_per_day(config.market.timeframe),
+        periods=config.periods_per_year,
     )
 
     warnings: list[str] = [

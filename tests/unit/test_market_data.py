@@ -68,7 +68,8 @@ def test_fetch_assembles_months_and_skips_missing_ones() -> None:
     frame = source.fetch_ohlcv("BTC/USDT", "1d", date(2023, 11, 1), date(2025, 1, 31))
     assert len(frame) == 2
     assert frame.index.tz is not None
-    assert list(frame.columns) == ["open", "high", "low", "close", "volume"]
+    assert list(frame.columns)[:5] == ["open", "high", "low", "close", "volume"]
+    assert set(frame.columns[5:]) <= {"quote_volume", "trades", "taker_buy_quote"}
 
 
 def test_fetch_rejects_checksum_mismatch() -> None:
@@ -84,7 +85,7 @@ def test_fetch_without_any_data_raises() -> None:
 
 def test_unsupported_timeframe() -> None:
     with pytest.raises(DataError, match="not supported"):
-        _source({}).fetch_ohlcv("BTC/USDT", "1h", date(2024, 1, 1), date(2024, 1, 31))
+        _source({}).fetch_ohlcv("BTC/USDT", "5m", date(2024, 1, 1), date(2024, 1, 31))
 
 
 def test_normalize_sorts_dedupes_and_localizes() -> None:

@@ -2,7 +2,8 @@
 
 Implemented directly (and unit-tested against hand-computed values) so the
 numbers the platform reports never depend on the conventions of a third-party
-library changing underneath us. Crypto trades every day: 365 periods per year.
+library changing underneath us. Crypto trades every day: 365 daily periods per
+year; intraday timeframes pass their own count (``periods_per_year``).
 """
 
 from __future__ import annotations
@@ -102,24 +103,29 @@ def compute_metrics(
     initial_capital: float,
     trades: Sequence[Trade] = (),
     exposure: pd.Series | None = None,
+    periods: int = PERIODS_PER_YEAR,
 ) -> dict[str, float]:
-    """Full metric set for an equity curve and (optionally) its trades."""
+    """Full metric set for an equity curve and (optionally) its trades.
+
+    ``periods`` is the number of candles per year of the equity curve's
+    timeframe (365 for daily candles): it drives every annualised figure.
+    """
     previous = equity.shift(1)
     if len(previous):
         previous.iloc[0] = initial_capital
     returns = equity / previous - 1.0
-    growth = cagr(equity, initial_capital)
+    growth = cagr(equity, initial_capital, periods)
     mdd = max_drawdown(pd.concat([pd.Series([initial_capital]), equity], ignore_index=True))
     metrics: dict[str, float] = {
         "initial_capital": float(initial_capital),
         "final_equity": float(equity.iloc[-1]) if len(equity) else float(initial_capital),
         "total_return": float(equity.iloc[-1] / initial_capital - 1.0) if len(equity) else 0.0,
         "cagr": growth,
-        "annual_volatility": float(returns.std(ddof=1) * math.sqrt(PERIODS_PER_YEAR))
+        "annual_volatility": float(returns.std(ddof=1) * math.sqrt(periods))
         if len(returns) > 1
         else 0.0,
-        "sharpe": sharpe_ratio(returns),
-        "sortino": sortino_ratio(returns),
+        "sharpe": sharpe_ratio(returns, periods),
+        "sortino": sortino_ratio(returns, periods),
         "max_drawdown": mdd,
         "max_drawdown_duration_bars": float(max_drawdown_duration(equity)),
         "calmar": growth / mdd if mdd > 0 else 0.0,

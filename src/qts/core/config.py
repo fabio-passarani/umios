@@ -20,6 +20,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
+import pandas as pd
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,6 +28,7 @@ from sqlalchemy.engine import URL
 
 from qts.core.errors import ConfigError, LiveTradingDisabledError
 from qts.core.types import TradingMode
+from qts.market_data.schema import bar_duration, periods_per_year
 
 
 class _Model(BaseModel):
@@ -39,7 +41,9 @@ class MarketConfig(_Model):
     asset_class: Literal["crypto_spot"] = "crypto_spot"
     exchange: str = "binance"
     symbols: tuple[str, ...] = ("BTC/USDT", "ETH/USDT")
-    timeframe: Literal["1d"] = "1d"
+    #: Candle length. Indicator windows are counted in candles, so the same
+    #: parameters describe a different strategy on a different timeframe.
+    timeframe: Literal["1h", "4h", "1d"] = "1d"
     quote_currency: str = "USDT"
 
     @model_validator(mode="after")
@@ -195,6 +199,16 @@ class AppConfig(_Model):
                     "validation.out_of_sample_start must lie inside data.start..data.end"
                 )
         return self
+
+    @property
+    def periods_per_year(self) -> int:
+        """Candles per year of the configured timeframe (annualisation factor)."""
+        return periods_per_year(self.market.timeframe)
+
+    @property
+    def bar(self) -> pd.Timedelta:
+        """Length of one candle of the configured timeframe."""
+        return bar_duration(self.market.timeframe)
 
     def fingerprint(self) -> str:
         """Stable hash of the full configuration, stored with every result.
