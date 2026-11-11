@@ -62,10 +62,22 @@ class Storage:
         except (SQLAlchemyError, ImportError, ValueError) as exc:  # pragma: no cover
             raise PersistenceError(f"cannot configure database ({REDACTED})") from exc
         self._sessions = sessionmaker(self.engine, expire_on_commit=False)
+        self._unit: Session | None = None
 
     @contextmanager
     def session(self) -> Iterator[Session]:
-        """Transactional scope: commit on success, roll back and wrap on failure."""
+        """Transactional scope: commit on success, roll back and wrap on failure.
+
+        Inside :meth:`transaction` it joins the surrounding unit of work instead
+        (flush only), so the whole unit commits or rolls back together.
+        """
+        if self._unit is not None:
+            try:
+                yield self._unit
+                self._unit.flush()
+            except SQLAlchemyError as exc:
+                raise PersistenceError(f"database operation failed: {type(exc).__name__}") from exc
+            return
         session = self._sessions()
         try:
             yield session
@@ -75,6 +87,34 @@ class Storage:
             # Never echo the exception text: drivers may include the DSN.
             raise PersistenceError(f"database operation failed: {type(exc).__name__}") from exc
         finally:
+            session.close()
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Run several repository calls as **one** atomic unit of work.
+
+        Everything written inside the block is committed together at the end, or
+        not at all if anything raises. Used where a partial write would corrupt
+        the record — e.g. a paper-trading step, whose fills, trades and resume
+        point must never get out of step with each other. Not re-entrant across
+        threads (the platform has a single trading loop); nesting is allowed.
+        """
+        if self._unit is not None:
+            yield
+            return
+        session = self._sessions()
+        self._unit = session
+        try:
+            yield
+            session.commit()
+        except SQLAlchemyError as exc:
+            session.rollback()
+            raise PersistenceError(f"database operation failed: {type(exc).__name__}") from exc
+        except BaseException:
+            session.rollback()
+            raise
+        finally:
+            self._unit = None
             session.close()
 
     def init_schema(self) -> None:
@@ -211,6 +251,14 @@ class Storage:
                     reason=f.reason.value,
                 )
                 for f in fills
+            )
+
+    def fills(self, run_id: str) -> list[FillRow]:
+        with self.session() as s:
+            return list(
+                s.scalars(
+                    select(FillRow).where(FillRow.run_id == run_id).order_by(FillRow.id)
+                ).all()
             )
 
     def add_trades(self, run_id: str, trades: Iterable[Trade]) -> None:

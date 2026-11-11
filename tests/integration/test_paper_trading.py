@@ -11,7 +11,7 @@ import pytest
 
 from qts.backtesting.engine import run_backtest
 from qts.core.config import AppConfig
-from qts.core.errors import ConfigError, DataError
+from qts.core.errors import ConfigError, DataError, PersistenceError
 from qts.core.types import TradingMode
 from qts.execution.paper import PaperTrader
 from qts.integrations.db.storage import Storage
@@ -166,3 +166,80 @@ def test_paper_trader_refuses_non_paper_mode(
     backtest = paper_config.model_copy(update={"mode": TradingMode.BACKTEST})
     with pytest.raises(ConfigError, match="mode: paper"):
         trader(backtest, storage, parquet, tmp_path)
+
+
+def test_crash_while_saving_a_step_does_not_duplicate_orders(
+    storage: Storage,
+    paper_config: AppConfig,
+    candles: pd.DataFrame,
+    parquet: ParquetStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The database dies after the fills were written but before the resume point
+    was saved. The step must leave no trace, so the retry books every order once."""
+    publish(parquet, candles, START)
+    run_id = trader(paper_config, storage, parquet, tmp_path).start()
+    trader(paper_config, storage, parquet, tmp_path).step(
+        now=publish(parquet, candles, START + 100)
+    )
+    fills_before = len(storage.fills(run_id))
+    trades_before = len(storage.trades(run_id))
+    bars_before = len(storage.equity_curve(run_id))
+
+    now = publish(parquet, candles, len(candles))
+    with monkeypatch.context() as patch:
+
+        def crash(*_args: object, **_kwargs: object) -> None:
+            raise PersistenceError("simulated outage")
+
+        patch.setattr(storage, "save_paper_state", crash)
+        with pytest.raises(PersistenceError, match="simulated outage"):
+            trader(paper_config, storage, parquet, tmp_path).step(now=now)
+
+    # nothing of the failed step was kept
+    assert len(storage.fills(run_id)) == fills_before
+    assert len(storage.trades(run_id)) == trades_before
+    assert len(storage.equity_curve(run_id)) == bars_before
+
+    trader(paper_config, storage, parquet, tmp_path).step(now=now)  # the service retries
+    expected = run_backtest(
+        paper_config.model_copy(update={"mode": TradingMode.BACKTEST}),
+        {SYMBOL: candles},
+        start=candles.index[START],
+    )
+    assert len(expected.fills) > fills_before  # the failed step did contain orders
+    assert len(storage.fills(run_id)) == len(expected.fills)
+    assert len(storage.trades(run_id)) == len(expected.trades)
+    assert len(storage.risk_decisions(run_id)) == len(expected.decisions)
+    order_ids = [f.order_id for f in storage.fills(run_id)]
+    assert len(order_ids) == len(set(order_ids))
+    assert storage.equity_curve(run_id)["equity"].tolist() == pytest.approx(
+        expected.equity.tolist(), rel=1e-12
+    )
+
+
+def test_operator_kill_stops_a_paper_trader_that_is_already_running(
+    storage: Storage,
+    paper_config: AppConfig,
+    candles: pd.DataFrame,
+    parquet: ParquetStore,
+    tmp_path: Path,
+) -> None:
+    """One long-lived PaperTrader (the `qts paper run` service); the operator
+    runs `qts risk kill` in another process, at wall-clock time."""
+    publish(parquet, candles, START)
+    service = trader(paper_config, storage, parquet, tmp_path)
+    run_id = service.start()
+    service.step(now=publish(parquet, candles, START + 30))
+    entries_before = sum(1 for f in storage.fills(run_id) if f.side == "buy")
+
+    KillSwitch(tmp_path / "kill.json").activate("manual stop", source="operator")
+
+    report = service.step(now=publish(parquet, candles, len(candles)))
+    assert report.kill_switch_active
+    assert sum(1 for f in storage.fills(run_id) if f.side == "buy") == entries_before
+    cutoff = candles.index[START + 30].tz_localize(None)  # SQLite returns naive UTC datetimes
+    late = [d for d in storage.risk_decisions(run_id) if d.ts.replace(tzinfo=None) > cutoff]
+    assert [d for d in late if d.side == "buy"]  # the strategy kept asking
+    assert all("kill_switch" in d.failed_checks for d in late if d.side == "buy")

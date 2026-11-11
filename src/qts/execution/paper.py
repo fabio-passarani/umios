@@ -210,6 +210,21 @@ class PaperTrader:
         peak_before: float,
         benchmark: pd.Series | None,
     ) -> None:
+        # One transaction for the whole step: the fills, the trades and the resume
+        # point (paper state) are committed together or not at all. Written
+        # separately, a crash in between would leave the fills stored but the
+        # state not advanced, and the retry would book the same orders twice.
+        with self.storage.transaction():
+            self._write_step(run_id, session, journal, peak_before, benchmark)
+
+    def _write_step(
+        self,
+        run_id: str,
+        session: TradingSession,
+        journal: RiskJournal,
+        peak_before: float,
+        benchmark: pd.Series | None,
+    ) -> None:
         curve = session.equity_curve
         if curve:
             index = pd.DatetimeIndex([p.timestamp for p in curve])
