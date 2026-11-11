@@ -1,0 +1,138 @@
+# Quant Trading System — local stack.
+#   docker compose up -d                      -> postgres, paper trader, grafana
+#   docker compose --profile freqtrade up -d  -> + Freqtrade dry-run (simulated wallet)
+#   docker compose run --rm backup            -> database dump into ./backups
+# Every published port is bound to 127.0.0.1: nothing is reachable from the network.
+
+name: qts
+
+x-qts: &qts
+  build: .
+  image: qts:local
+  restart: unless-stopped
+  environment: &qts-env
+    QTS_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    QTS_CONFIG_FILE: /app/configs/paper.yaml
+    QTS_STATE_DIR: /app/state
+    QTS_LOG_LEVEL: ${QTS_LOG_LEVEL:-INFO}
+    QTS_LOG_JSON: ${QTS_LOG_JSON:-true}
+    QTS_ENABLE_LIVE_TRADING: "false"
+  volumes:
+    - ./configs:/app/configs:ro
+    - qts-data:/app/data
+    - qts-state:/app/state
+    - ./reports:/app/reports
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:?set GRAFANA_DB_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Simulated trading on live data. No exchange credentials are mounted or needed.
+  paper-trader:
+    <<: *qts
+    command: ["paper", "run", "--interval-minutes", "60"]
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-12.2.1}
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/qts-overview.json
+      QTS_DB_NAME: ${POSTGRES_DB}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Optional: Freqtrade in dry-run mode (its own simulated wallet, live order book).
+  # The command passes --dry-run explicitly and the config carries no API keys.
+  freqtrade:
+    profiles: ["freqtrade"]
+    build:
+      context: .
+      dockerfile: docker/freqtrade/Dockerfile
+    image: qts-freqtrade:local
+    restart: unless-stopped
+    environment:
+      FREQTRADE__DB_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/freqtrade
+      FREQTRADE__API_SERVER__USERNAME: ${FREQTRADE_API_USERNAME:-}
+      FREQTRADE__API_SERVER__PASSWORD: ${FREQTRADE_API_PASSWORD:-}
+      FREQTRADE__API_SERVER__JWT_SECRET_KEY: ${FREQTRADE_JWT_SECRET:-}
+      QTS_CONFIG_FILE: /freqtrade/configs/paper.yaml
+      QTS_STATE_DIR: /freqtrade/state
+      QTS_ENABLE_LIVE_TRADING: "false"
+    command:
+      - trade
+      - --dry-run
+      - --config
+      - /freqtrade/configs/freqtrade/config.json
+      - --config
+      - /freqtrade/configs/freqtrade/config.api.json
+      - --strategy
+      - QtsTrendFollowing
+    volumes:
+      - qts-state:/freqtrade/state
+      - freqtrade-data:/freqtrade/user_data/data
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # One-shot logical backup of all databases into ./backups (see scripts/backup.sh).
+  backup:
+    profiles: ["backup"]
+    image: postgres:17-alpine
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./backups:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        umask 077 &&
+        pg_dumpall --clean --if-exists | gzip > /backups/qts-$$(date -u +%Y%m%dT%H%M%SZ).sql.gz &&
+        ls -1t /backups/qts-*.sql.gz | tail -n +15 | xargs -r rm -- &&
+        echo "backup written"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  grafana-data:
+  qts-data:
+  qts-state:
+  freqtrade-data:

@@ -1,0 +1,17 @@
+.git
+.venv
+.env
+.env.*
+!.env.example
+data
+state
+reports
+backups
+**/__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+freqtrade/user_data/data
+freqtrade/user_data/logs
+freqtrade/user_data/backtest_results
+*.sqlite*
