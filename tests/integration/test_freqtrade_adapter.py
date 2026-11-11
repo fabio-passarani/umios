@@ -117,8 +117,8 @@ def test_core_package_never_imports_freqtrade() -> None:
 def test_adapter_strategy_produces_platform_signals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    pytest.importorskip("freqtrade")
-    from freqtrade.enums import RunMode
+    # Not importorskip("freqtrade"): the repo's own freqtrade/ folder would satisfy it.
+    RunMode = pytest.importorskip("freqtrade.enums").RunMode
 
     monkeypatch.setenv("QTS_CONFIG_FILE", str(ROOT / "configs" / "default.yaml"))
     monkeypatch.setenv("QTS_STATE_DIR", str(tmp_path))
