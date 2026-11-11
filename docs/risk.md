@@ -10,7 +10,11 @@ Implementation: `qts.risk`. Limits: the `risk:` section of the YAML config.
    rejection is final.
 3. **Cannot be bypassed.** `Broker.execute` takes a `RiskApproval`, not an order.
    Approvals are HMAC-signed with a per-engine secret and are single-use; the
-   broker asks the engine to verify and consume them.
+   broker asks the engine to verify and consume them. An approval is bound to
+   what was evaluated: it expires after one minute, an entry can only be filled
+   at the approved price, the kill switch is checked again at execution, and a
+   newer entry approval revokes any unused older one (two entries approved on
+   the same account snapshot can never both execute).
 4. **Fail closed.** Bad numbers, stale data, unknown price, tripped kill switch or
    live mode → reject.
 5. **Closing is always possible.** Sells that reduce a position pass even when the
@@ -23,7 +27,8 @@ Implementation: `qts.risk`. Limits: the `risk:` section of the YAML config.
 | Check | Limit | Default |
 |---|---|---|
 | Operating mode is backtest/paper | — | live always rejected |
-| Order sanity (finite, positive numbers) | — | — |
+| Order sanity (finite, positive numbers; no negative or non-finite positions) | — | — |
+| Every open position has a trusted price | — | — |
 | Symbol whitelist | `allowed_symbols` | BTC/USDT, ETH/USDT |
 | Kill switch not active | — | — |
 | Daily loss halt | `max_daily_loss_pct` | 5% |
@@ -53,8 +58,16 @@ risk limits allow.
 
 ## Kill switch
 
-Persistent (`state/kill_switch.json`), survives restarts, and a corrupt state file
-is treated as *active*. Only a human resets it:
+Persistent (`state/kill_switch.json`), survives restarts, and a corrupt, malformed
+or unreadable state file is treated as *active*. Only a human resets it.
+
+The file is shared by every process and re-read whenever it changes, so
+`qts risk kill` stops a paper trader or Freqtrade bot that is **already running**
+(in Docker: `docker compose run --rm paper-trader risk kill --reason "…"`), with
+no restart. An operator activation blocks every new entry from that moment on,
+whatever the timestamp of the candle being processed. Only automatic trips by
+the engine carry the simulated time of the breach, so that a replay after a
+restart reproduces the same decisions.
 
 ```bash
 qts risk status
@@ -66,10 +79,14 @@ qts risk reset --operator "your name"   # also re-bases the drawdown measure
 
 ## Tests
 
-`tests/risk/test_engine.py` covers each limit; `tests/risk/test_no_bypass.py`
-covers raw orders, forged / altered / replayed / foreign approvals, a strategy
-that wants to trade while the engine forbids it, and a kill switch tripping in
-the middle of a backtest.
+`tests/risk/test_engine.py` covers each limit and the kill-switch file (another
+process killing or resetting it, malformed content); `tests/risk/test_no_bypass.py`
+covers raw orders, forged / altered / replayed / foreign / expired / revoked
+approvals, execution at a price other than the approved one, a kill switch
+tripping between approval and execution, a strategy that wants to trade while
+the engine forbids it, and a kill switch tripping in the middle of a backtest.
+The independent audit ([independent-audit.md](independent-audit.md)) lists the
+attacks that were tried and their outcome.
 
 ## Honest limits
 

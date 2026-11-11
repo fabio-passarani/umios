@@ -14,9 +14,17 @@ qts.integrations.freqtrade.FreqtradeBridge   (no Freqtrade import)
 ```
 
 Freqtrade run modes are mapped to platform modes; anything that is not
-backtest/hyperopt/dry-run resolves to `LIVE`, and the risk engine rejects every
-entry in that mode. So even if someone removed `--dry-run`, the adapter would
-not open positions.
+backtest/hyperopt/dry-run resolves to `LIVE`. In that mode the adapter **refuses
+to load** (`LiveTradingDisabledError`), so a bot started without `--dry-run`, or
+with `dry_run: false`, exits immediately instead of starting — whatever the
+`QTS_*` opt-in variables say. As a second line of defence the risk engine also
+rejects every entry in `LIVE` mode.
+
+The bot shares the platform's kill switch (`state/kill_switch.json`, re-read on
+every decision: `qts risk kill` stops a running bot's entries without a restart)
+and keeps its own circuit-breaker state (equity peak, daily-loss halt, daily
+order count) in `state/freqtrade_risk_state.json`, so restarting the bot does not
+reset the drawdown measure.
 
 ## Backtest with Freqtrade (cross-check of the internal engine)
 

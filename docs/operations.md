@@ -7,13 +7,17 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,reporting]"      # extras: ai, freqtrade
 ```
 
+For an install that is identical to the audited one (Python 3.12), add the
+constraints file: `pip install -e ".[dev,reporting,ai]" -c requirements-lock.txt`.
+The Docker image always uses it.
+
 Settings are read from the environment or `.env` (prefix `QTS_`):
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `QTS_CONFIG_FILE` | `configs/default.yaml` | YAML config used when `-c` is not given |
 | `QTS_DATABASE_URL` | `sqlite:///state/qts.sqlite` | operational database |
-| `QTS_STATE_DIR` | `state` | kill-switch state |
+| `QTS_STATE_DIR` | `state` | kill-switch state, Freqtrade risk state |
 | `QTS_LOG_LEVEL`, `QTS_LOG_JSON` | `INFO`, `true` | logging |
 
 ## Commands
@@ -58,6 +62,15 @@ passes every order through the risk engine and books simulated fills. A decision
 taken at the close of day *D* is filled at the open of *D+1* and appears once the
 *D+1* candle is complete. Changing the configuration requires a new session
 (`qts paper stop` then `start`) so results stay attributable to one config.
+
+Each step is written to the database in a single transaction (equity, fills,
+trades, risk decisions, positions and the resume point together): if the
+database fails half-way nothing of that step is kept, and the next step redoes
+it from scratch without duplicating any order.
+
+`scripts/smoke_test.sh` checks a running stack end to end (schema, read-only
+Grafana role, kill switch, refusal of `mode: live`, dashboard); CI runs it on
+every push.
 
 ## Dashboard
 

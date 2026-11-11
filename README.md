@@ -30,6 +30,7 @@ Requires Python 3.11+.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev,reporting]"        # add ",ai" and/or ",freqtrade" when needed
+# exact audited versions (Python 3.12): append  -c requirements-lock.txt
 
 qts config                               # validate configs/default.yaml, print fingerprint
 qts data download                        # real BTC/USDT and ETH/USDT daily candles since 2018
@@ -110,8 +111,11 @@ docs/            architecture, strategy, risk, validation, operations, security,
 - [Security](docs/security.md) — secrets, modes, what is and is not protected
 - [Licensing](docs/licensing.md) — dependency licences and why there is no `LICENSE` yet
 - [Roadmap](docs/roadmap.md) — what is **not** implemented yet
+- [Independent audit](docs/independent-audit.md) — what was verified from a clean clone,
+  what was found and fixed, what is still open
 
 ## Quality gates
 
 `ruff check .` · `ruff format --check .` · `mypy` (strict) · `pytest` — all run in
-[GitHub Actions](.github/workflows/ci.yml) together with a Docker build and a secret scan.
+[GitHub Actions](.github/workflows/ci.yml) together with a build of both Docker images, a
+smoke test of the running stack (`scripts/smoke_test.sh`) and a secret scan.
