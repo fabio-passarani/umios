@@ -1,0 +1,98 @@
+# Known-good, exact versions of every dependency (core + dev, reporting, ai extras).
+#
+# pyproject.toml only sets lower bounds, so two installs made on different days
+# can resolve to different versions. This file records the set that the
+# independent audit (docs/independent-audit.md) installed in a clean Python 3.12
+# environment and verified end to end. It is a *constraints* file:
+#
+#     pip install -e ".[dev,reporting,ai]" -c requirements-lock.txt
+#
+# The Docker image and the Python 3.12 CI jobs use it; the Python 3.11 CI job
+# deliberately does not, to give early warning when a new upstream release breaks.
+# Regenerate after an upgrade, in a clean venv:
+#     pip install -e ".[dev,reporting,ai]" && pip freeze --exclude-editable
+alembic==1.20.1
+annotated-doc==0.0.6
+annotated-types==0.8.0
+anyio==4.16.0
+ast_serialize==0.13.1
+beautifulsoup4==4.15.0
+certifi==2026.10.23
+cffi==2.1.1
+charset-normalizer==3.5.2
+cloudpickle==3.1.2
+colorlog==6.12.0
+contourpy==1.4.0
+coverage==7.17.2
+curl_cffi==0.17.0
+cycler==0.12.1
+fonttools==4.68.0
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.1
+joblib==1.6.0
+kiwisolver==1.5.1
+librt==0.16.0
+lightgbm==4.7.0
+lxml==6.1.3
+Mako==1.4.3
+markdown-it-py==4.3.0
+MarkupSafe==3.0.4
+matplotlib==3.11.2
+mdurl==0.1.2
+mypy==2.4.1
+mypy_extensions==1.2.0
+narwhals==2.28.0
+numpy==2.5.4
+optuna==5.0.0
+packaging==26.3
+pandas==3.1.1
+pandas-stubs==3.1.0.261029
+pathspec==1.1.1
+peewee==4.5.3
+pillow==13.0.0
+platformdirs==4.14.5
+pluggy==1.7.0
+protobuf==7.36.2
+psycopg==3.3.8
+psycopg-binary==3.3.8
+pyarrow==26.0.1
+pycparser==3.12
+pydantic==2.14.3
+pydantic-settings==2.16.2
+pydantic_core==2.50.4
+Pygments==2.21.0
+pyparsing==3.3.3
+pytest==9.2.0
+pytest-cov==7.1.0
+python-dateutil==4.0.0
+python-dotenv==1.2.4
+pytz==2026.6
+PyYAML==6.0.3
+quantstats==0.0.86
+requests==2.34.2
+rich==15.0.0
+ruff==0.17.4
+scikit-learn==1.9.1
+scipy==1.18.1
+seaborn==0.13.2
+shap==0.54.1
+shellingham==1.5.4
+slicer==0.0.8
+soupsieve==4.1
+SQLAlchemy==2.1.8
+structlog==26.1.0
+tabulate==0.10.0
+threadpoolctl==3.8.0
+tqdm==4.70.1
+typer==0.29.0
+types-PyYAML==6.0.12.20261103
+typing-inspection==0.4.5
+typing_extensions==4.16.0
+tzdata==2026.6
+urllib3==2.8.0
+wcwidth==0.9.4
+websockets==17.4
+yfinance==1.8.0

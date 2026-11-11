@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: pip install -e ".[dev,reporting]"
+      - run: pip install -e ".[dev,reporting]" -c requirements-lock.txt
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy
@@ -36,7 +36,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12"]
+        include:
+          # the pinned, audited set (the same one the Docker image installs)
+          - python: "3.12"
+            pip_args: "-c requirements-lock.txt"
+          # latest compatible releases: early warning when upstream breaks
+          - python: "3.11"
+            pip_args: ""
     services:
       postgres:
         image: postgres:17-alpine
@@ -55,7 +61,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: pip install -e ".[dev,reporting,ai]"
+      - run: pip install -e ".[dev,reporting,ai]" ${{ matrix.pip_args }}
       - run: pytest --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=85
       - uses: actions/upload-artifact@v4
         if: matrix.python == '3.12'

@@ -13,10 +13,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN useradd --create-home --uid 1000 qts
 
 WORKDIR /app
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md requirements-lock.txt ./
 COPY src ./src
 ARG QTS_EXTRAS=reporting
-RUN pip install ".[${QTS_EXTRAS}]"
+# Exact, audited versions: the image is the same whenever it is built.
+RUN pip install -c requirements-lock.txt ".[${QTS_EXTRAS}]"
 
 COPY configs ./configs
 RUN mkdir -p /app/data /app/state /app/reports && chown -R qts:qts /app
