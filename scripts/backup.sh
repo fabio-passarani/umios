@@ -11,6 +11,9 @@ chmod 700 backups
 docker compose run --rm backup
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-docker compose run --rm --no-deps --entrypoint tar -v "$(pwd)/backups:/backups" paper-trader \
-    czf "/backups/qts-state-${stamp}.tar.gz" -C /app state
+# Runs as root inside the container (like the database dump above): the image's
+# unprivileged user cannot write into ./backups, which is deliberately mode 700.
+docker compose run --rm --no-deps --user root --entrypoint sh \
+    -v "$(pwd)/backups:/backups" paper-trader \
+    -c "umask 077 && tar czf /backups/qts-state-${stamp}.tar.gz -C /app state"
 echo "Backups in $(pwd)/backups (git-ignored). Copy them off this machine."
