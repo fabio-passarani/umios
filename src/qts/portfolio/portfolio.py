@@ -22,6 +22,8 @@ class Position:
     entry_fees: float
     stop_price: float | None = None
     highest_close: float | None = None
+    #: True once the stop has been ratcheted above its initial level.
+    stop_is_trailing: bool = False
 
     def market_value(self, price: float) -> float:
         return self.quantity * price

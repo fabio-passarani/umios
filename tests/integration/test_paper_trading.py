@@ -11,8 +11,9 @@ import pytest
 
 from qts.backtesting.engine import run_backtest
 from qts.core.config import AppConfig
-from qts.core.errors import ConfigError, DataError, PersistenceError
-from qts.core.types import TradingMode
+from qts.core.errors import ConfigError, DataError, ExecutionError, PersistenceError
+from qts.core.types import OrderReason, TradingMode
+from qts.execution.broker import PaperBroker
 from qts.execution.paper import PaperTrader
 from qts.integrations.db.storage import Storage
 from qts.market_data.store import ParquetStore
@@ -243,3 +244,90 @@ def test_operator_kill_stops_a_paper_trader_that_is_already_running(
     late = [d for d in storage.risk_decisions(run_id) if d.ts.replace(tzinfo=None) > cutoff]
     assert [d for d in late if d.side == "buy"]  # the strategy kept asking
     assert all("kill_switch" in d.failed_checks for d in late if d.side == "buy")
+
+
+def _first_open_position(
+    storage: Storage, cfg: AppConfig, candles: pd.DataFrame, parquet: ParquetStore, tmp_path: Path
+) -> tuple[str, int]:
+    """Advance a fresh session one candle at a time until a position is open."""
+    publish(parquet, candles, START)
+    run_id = trader(cfg, storage, parquet, tmp_path).start()
+    for upto in range(START + 1, len(candles)):
+        trader(cfg, storage, parquet, tmp_path).step(now=publish(parquet, candles, upto))
+        if storage.positions(run_id):
+            return run_id, upto
+    raise AssertionError("the synthetic data never opened a position")
+
+
+def test_operator_can_close_a_position_while_the_kill_switch_is_active(
+    storage: Storage,
+    paper_config: AppConfig,
+    candles: pd.DataFrame,
+    parquet: ParquetStore,
+    tmp_path: Path,
+) -> None:
+    run_id, upto = _first_open_position(storage, paper_config, candles, parquet, tmp_path)
+    KillSwitch(tmp_path / "kill.json").activate("manual stop", source="operator")
+
+    # half now (manual), the rest as an emergency on the following day
+    operator = trader(paper_config, storage, parquet, tmp_path)
+    assert operator.request_exit([SYMBOL], OrderReason.MANUAL, fraction=0.5) == [SYMBOL]
+    trader(paper_config, storage, parquet, tmp_path).step(now=publish(parquet, candles, upto + 1))
+    (half,) = storage.positions(run_id)
+    assert operator.request_exit(None, OrderReason.EMERGENCY) == [SYMBOL]
+    trader(paper_config, storage, parquet, tmp_path).step(now=publish(parquet, candles, upto + 2))
+
+    assert storage.positions(run_id) == []
+    sells = [f for f in storage.fills(run_id) if f.side == "sell"]
+    assert [f.reason for f in sells] == ["manual", "emergency"]
+    assert sells[0].quantity == pytest.approx(half.quantity)  # half out, half left
+    assert sells[0].ts.replace(tzinfo=None) == candles.index[upto].tz_localize(None)  # next open
+    exits = [d for d in storage.risk_decisions(run_id) if d.side == "sell"]
+    assert len(exits) == 2
+    assert all(d.approved for d in exits)
+    assert operator.request_exit(None) == []  # nothing left to close
+
+
+def test_broker_failure_in_the_middle_of_a_step_leaves_no_trace_and_is_counted(
+    storage: Storage,
+    paper_config: AppConfig,
+    candles: pd.DataFrame,
+    parquet: ParquetStore,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exchange rejects an order while a position is open. Nothing of the
+    half-processed step is stored; the failure counts towards the kill switch;
+    the retry executes every order exactly once."""
+    run_id, upto = _first_open_position(storage, paper_config, candles, parquet, tmp_path)
+    fills_before = len(storage.fills(run_id))
+    now = publish(parquet, candles, len(candles))
+
+    def reject(*_a: object, **_k: object) -> None:
+        raise ExecutionError("exchange rejected the order")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(PaperBroker, "execute", reject)
+        with pytest.raises(ExecutionError):
+            trader(paper_config, storage, parquet, tmp_path).step(now=now)
+    assert len(storage.fills(run_id)) == fills_before
+    assert len(storage.equity_curve(run_id)) == upto - START  # no bar of the failed step
+    assert len(storage.positions(run_id)) == 1  # the open position is still on the books
+    assert any(b.status == "degraded" for b in storage.heartbeats())
+    state = storage.load_paper_state(run_id)
+    assert state is not None
+    assert state["risk"]["consecutive_errors"] == 1
+
+    trader(paper_config, storage, parquet, tmp_path).step(now=now)
+    expected = run_backtest(
+        paper_config.model_copy(update={"mode": TradingMode.BACKTEST}),
+        {SYMBOL: candles},
+        start=candles.index[START],
+    )
+    assert len(storage.fills(run_id)) == len(expected.fills)
+    assert storage.equity_curve(run_id)["equity"].tolist() == pytest.approx(
+        expected.equity.tolist(), rel=1e-12
+    )
+    state = storage.load_paper_state(run_id)
+    assert state is not None
+    assert state["risk"]["consecutive_errors"] == 0  # a healthy step resets the count

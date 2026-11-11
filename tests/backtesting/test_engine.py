@@ -105,7 +105,7 @@ def test_trailing_stop_ratchets_up_only(config: AppConfig) -> None:
     strategy = ScriptedStrategy({1}, set(), stop=20.0, trail=20.0)
     result = run_backtest(cfg(config), {SYMBOL: candles}, strategy)
     stop = result.fills[1]
-    assert stop.reason is OrderReason.STOP_LOSS
+    assert stop.reason is OrderReason.TRAILING_STOP  # the ratcheted stop, not the initial one
     assert stop.price == pytest.approx(140.0)  # highest close 160 - 20
     assert stop.timestamp == candles.index[6]
 

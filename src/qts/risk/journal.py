@@ -25,10 +25,15 @@ class RiskJournal:
     """Keeps decisions in memory, logs them, and forwards them to optional sinks
     (e.g. the database writer) so that nothing the engine decides goes unrecorded."""
 
-    def __init__(self, sinks: list[Callable[[RiskDecision], None]] | None = None) -> None:
+    def __init__(
+        self,
+        sinks: list[Callable[[RiskDecision], None]] | None = None,
+        event_sinks: list[Callable[[RiskEvent], None]] | None = None,
+    ) -> None:
         self.decisions: list[RiskDecision] = []
         self.events: list[RiskEvent] = []
         self._sinks = sinks or []
+        self._event_sinks = event_sinks or []
 
     def record(self, decision: RiskDecision) -> None:
         self.decisions.append(decision)
@@ -50,5 +55,8 @@ class RiskJournal:
             sink(decision)
 
     def record_event(self, timestamp: datetime, kind: str, detail: str) -> None:
-        self.events.append(RiskEvent(timestamp, kind, detail))
+        event = RiskEvent(timestamp, kind, detail)
+        self.events.append(event)
         log.warning("risk_event", kind=kind, detail=detail, at=timestamp.isoformat())
+        for sink in self._event_sinks:
+            sink(event)

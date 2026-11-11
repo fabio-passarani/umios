@@ -24,11 +24,20 @@ class Side(StrEnum):
 
 
 class OrderReason(StrEnum):
-    """Why an order was generated (kept on fills and trades for attribution)."""
+    """Why an order was generated (kept on fills and trades for attribution).
+
+    ``ENTRY`` is the only reason that *adds* exposure. Every other reason
+    belongs to an order that reduces or closes an existing position; the risk
+    engine authorises those through its reduce-only path (see docs/risk.md).
+    """
 
     ENTRY = "entry"
     EXIT_SIGNAL = "exit_signal"
     STOP_LOSS = "stop_loss"
+    TRAILING_STOP = "trailing_stop"
+    TAKE_PROFIT = "take_profit"
+    MANUAL = "manual"
+    EMERGENCY = "emergency"
     KILL_SWITCH = "kill_switch"
 
 
