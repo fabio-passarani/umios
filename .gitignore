@@ -1,0 +1,62 @@
+# --- Secrets & local configuration (never commit) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+configs/local*.yaml
+configs/freqtrade/*.private.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# --- Data & generated artefacts (reproducible, not versioned) ---
+data/*
+!data/.gitkeep
+reports/
+backups/
+*.parquet
+*.feather
+*.sqlite
+*.sqlite3
+*.db
+*.log
+logs/
+state/
+
+# --- Freqtrade runtime ---
+freqtrade/user_data/data/
+freqtrade/user_data/logs/
+freqtrade/user_data/backtest_results/
+freqtrade/user_data/hyperopt_results/
+freqtrade/user_data/plot/
+freqtrade/user_data/notebooks/
+freqtrade/user_data/*.sqlite*
+
+# --- ML artefacts ---
+models/
+optuna*.db
+mlruns/
+
+# --- Notebooks ---
+.ipynb_checkpoints/
+
+# --- Editors / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp

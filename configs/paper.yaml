@@ -1,0 +1,65 @@
+# Paper-trading configuration: same strategy and limits as default.yaml,
+# running forward on new candles with a simulated account (no real money).
+
+mode: paper              # simulated trading on live data, no real money
+
+market:
+  asset_class: crypto_spot
+  exchange: binance
+  symbols: ["BTC/USDT", "ETH/USDT"]
+  timeframe: 1d
+  quote_currency: USDT
+
+data:
+  directory: data
+  start: "2018-01-01"     # history is needed to warm up the indicators
+  end: null               # null = up to the last closed candle
+
+strategy:
+  name: trend_following
+  params:
+    breakout_window: 55   # enter on a close above the 55-day high
+    exit_window: 20       # exit on a close below the 20-day low
+    fast_ema: 50          # trend filter: 50-day EMA above 200-day EMA
+    slow_ema: 200
+    atr_window: 20
+    stop_atr_multiple: 3.0
+    trailing_stop: false  # enable only after validating it (see docs/strategy.md)
+    trailing_atr_multiple: 3.0
+    min_atr_pct: 0.0
+    max_atr_pct: 0.12     # skip entries when daily ATR exceeds 12% of price
+
+portfolio:
+  initial_capital: 10000
+  sizing:
+    risk_per_trade_pct: 0.01   # lose at most ~1% of equity if the stop is hit
+    max_position_pct: 0.30
+
+costs:
+  fee_rate: 0.001         # 0.10% taker fee per fill
+  slippage_bps: 5         # 0.05% adverse slippage per fill
+
+risk:                     # hard limits of the independent risk engine
+  max_risk_per_trade_pct: 0.0125
+  max_position_pct: 0.35
+  max_total_exposure_pct: 1.0   # spot, no leverage: never above 100% of equity
+  max_open_positions: 4
+  max_daily_loss_pct: 0.05
+  max_drawdown_pct: 0.25        # trips the kill switch
+  max_orders_per_day: 10
+  max_price_deviation_pct: 0.25
+  max_data_age_hours: 48
+  max_consecutive_errors: 3
+  require_stop_loss: true
+  flatten_on_kill_switch: false
+  allowed_symbols: ["BTC/USDT", "ETH/USDT"]
+
+validation:
+  out_of_sample_fraction: 0.3
+  walk_forward_train_days: 730
+  walk_forward_test_days: 180
+  monte_carlo_simulations: 2000
+  seed: 42
+  parameter_grid:
+    breakout_window: [20, 55, 100]
+    stop_atr_multiple: [2.0, 3.0]
