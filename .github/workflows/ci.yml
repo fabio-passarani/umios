@@ -82,14 +82,24 @@ jobs:
       - run: pytest tests/integration/test_freqtrade_adapter.py -v
 
   docker:
-    name: Docker build and compose config
+    name: Docker images and stack smoke test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: cp .env.example .env
       - run: docker compose --profile freqtrade --profile backup config --quiet
-      - run: docker build -t qts:ci .
-      - run: docker run --rm qts:ci config
+      - name: Build both images (platform and Freqtrade adapter)
+        run: docker compose --profile freqtrade build
+      - run: docker compose run --rm --no-deps paper-trader config
+      - name: Freqtrade image loads the platform package and the adapter strategy
+        run: >-
+          docker run --rm --entrypoint python qts-freqtrade:local -c
+          "import freqtrade, qts.integrations.freqtrade, pathlib;
+          assert pathlib.Path('/freqtrade/user_data/strategies/qts_trend_following.py').is_file()"
+      - name: Start PostgreSQL and Grafana, check schema, read-only role and dashboard
+        run: scripts/smoke_test.sh
+      - if: always()
+        run: docker compose --profile freqtrade down -v
 
   secrets:
     name: Secret scan
