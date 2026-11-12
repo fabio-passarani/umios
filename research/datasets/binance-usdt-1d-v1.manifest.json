@@ -1,5 +1,5 @@
 {
- "development_id": "d780ceff653fdd94",
+ "development_id": "96431e14fa30b4a6",
  "spec": {
   "development_end": "2023-12-31",
   "exchange": "binance",
@@ -8,6 +8,7 @@
   "rules": {
    "liquidity_window_days": 30,
    "max_gap_days": 3,
+   "min_daily_volatility": 0.003,
    "min_history_days": 90,
    "min_quote_volume": 1000000,
    "top_n": 30
@@ -7328,24 +7329,6 @@
     "sha256": "2072cd4b43a0c4cb4ea9611ffacb720c1d91e2e28e82ac61fe636b5dda6076ea"
    }
   },
-  "USDEB/USDT": {
-   "development": null,
-   "test": {
-    "first": "2026-10-07T00:00:00+00:00",
-    "last": "2026-11-09T00:00:00+00:00",
-    "rows": 34,
-    "sha256": "af0767eb87b50a4e84e56f06cdca5981116e67e28b3b5725b298748fb6d9f446"
-   }
-  },
-  "USDSB/USDT": {
-   "development": {
-    "first": "2019-06-24T00:00:00+00:00",
-    "last": "2019-09-27T00:00:00+00:00",
-    "rows": 96,
-    "sha256": "e49cf228653c2bd82de24fb134b60b0d4ef04ee4b37ec6d39fdfdd4cc4a5078f"
-   },
-   "test": null
-  },
   "USUAL/USDT": {
    "development": null,
    "test": {
@@ -8093,5 +8076,5 @@
    }
   }
  },
- "test_id": "ebb9fc6a6de955ba"
+ "test_id": "abeb0038dac3e108"
 }

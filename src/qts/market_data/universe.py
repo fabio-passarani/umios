@@ -36,7 +36,7 @@ STABLE_OR_FIAT = frozenset(
         "USDC", "BUSD", "TUSD", "USDP", "PAX", "DAI", "FDUSD", "USDS", "SUSD", "UST", "USTC",
         "USDD", "EUR", "EURI", "GBP", "AUD", "BRL", "RUB", "TRY", "UAH", "NGN", "ZAR", "BIDR",
         "IDRT", "BKRW", "BVND", "VAI", "AEUR", "XUSD", "USD1", "PYUSD", "USDE", "EURC",
-        "USDSOLD", "USDSB",
+        "USDSOLD", "USDSB", "USDEB",
     }
 )  # fmt: skip
 WRAPPED = frozenset({"WBTC", "WBETH", "BETH", "BNSOL"})
@@ -139,6 +139,10 @@ class UniverseRules:
       of the market;
     * ``top_n`` 30 — the most liquid names among those, so the universe has a
       stable size through time instead of growing with the number of listings;
+    * ``min_daily_volatility`` 0.3% — an instrument whose price barely moves is
+      pegged to something (a stablecoin under a name the exclusion list does not
+      know). It is a statement about what the instrument is, measured on its
+      past, not about whether it went up or down;
     * membership is reviewed on the first day of each month.
     """
 
@@ -147,6 +151,7 @@ class UniverseRules:
     liquidity_window_days: int = 30
     min_quote_volume: float = 1_000_000.0
     top_n: int = 30
+    min_daily_volatility: float = 0.003
 
 
 def membership(data: dict[str, pd.DataFrame], rules: UniverseRules) -> pd.DataFrame:
@@ -174,12 +179,19 @@ def membership(data: dict[str, pd.DataFrame], rules: UniverseRules) -> pd.DataFr
     median = value.rolling(
         rules.liquidity_window_days, min_periods=rules.liquidity_window_days // 2
     ).median()
+    closes = pd.DataFrame({s: f["close"] for s, f in data.items()}).reindex(days)
+    volatility = (
+        closes.pct_change(fill_method=None)
+        .rolling(rules.liquidity_window_days, min_periods=rules.liquidity_window_days // 2)
+        .std()
+    )
 
     # everything shifted by one day: the row of D is what was known at the close of D-1
     known_age, known_median, traded_yesterday = age.shift(1), median.shift(1), present.shift(1)
     eligible = (
         (known_age >= rules.min_history_days)
         & (known_median >= rules.min_quote_volume)
+        & (volatility.shift(1) >= rules.min_daily_volatility)
         & traded_yesterday.fillna(False).astype(bool)
     )
     rank = known_median.where(eligible).rank(axis=1, ascending=False, method="first")

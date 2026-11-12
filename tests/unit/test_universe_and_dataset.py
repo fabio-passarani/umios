@@ -276,3 +276,16 @@ def test_dataset_commands_build_once_verify_and_report(
     broken = runner.invoke(app, ["dataset", "verify", *args])
     assert broken.exit_code == 1
     assert "BBB/USDT (test)" in broken.output
+
+
+def test_pegged_instruments_are_excluded_whatever_they_are_called() -> None:
+    """A stablecoin listed under a name the exclusion list has never heard of."""
+    peg = asset(200, "2021-01-01", 9e9, 1)
+    wobble = 1.0 + 0.0004 * np.sin(np.arange(200))
+    for column in ("open", "high", "low", "close"):
+        peg[column] = wobble
+    data = {"NEWUSD/USDT": peg, "REAL/USDT": asset(200, "2021-01-01", 5e7, 2)}
+    table = membership(data, RULES)
+    assert not table["NEWUSD/USDT"].any()  # by far the most liquid, and not an asset
+    assert table["REAL/USDT"].any()
+    assert classify("NEWUSD/USDT") is None  # the name alone would have let it in

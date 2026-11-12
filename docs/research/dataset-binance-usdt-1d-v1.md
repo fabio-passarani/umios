@@ -6,17 +6,17 @@ Binance spot, quote USDT, 1d candles, from the exchange's public archive (every 
 
 | Segment | From | To | Content id |
 |---|---|---|---|
-| Development (research may use it) | 2017-08-01 | 2023-12-31 | `d780ceff653fdd94` |
-| **Sealed test** | 2024-01-01 | 2026-11-09 | `ebb9fc6a6de955ba` |
+| Development (research may use it) | 2017-08-01 | 2023-12-31 | `96431e14fa30b4a6` |
+| **Sealed test** | 2024-01-01 | 2026-11-09 | `abeb0038dac3e108` |
 
 The test period has been opened **0** time(s). The stored data matches the committed manifest (every instrument, both segments).
 
 ## What is in it (development period)
 
-- **406 instruments, 390,533 candles.** **51** of them stopped trading before the period ended: they are kept, so results are not conditioned on survival.
+- **405 instruments, 390,437 candles.** **50** of them stopped trading before the period ended: they are kept, so results are not conditioned on survival.
 - Excluded by rule, whatever their performance: stablecoins and fiat currencies, leveraged tokens, wrapped duplicates.
-- Listed per year: 2017: 6, 2018: 15, 2019: 65, 2020: 104, 2021: 123, 2022: 41, 2023: 52.
-- Stopped trading per year: 2018: 2, 2019: 3, 2020: 6, 2021: 3, 2022: 23, 2023: 14.
+- Listed per year: 2017: 6, 2018: 15, 2019: 64, 2020: 104, 2021: 123, 2022: 41, 2023: 52.
+- Stopped trading per year: 2018: 2, 2019: 2, 2020: 6, 2021: 3, 2022: 23, 2023: 14.
 
 ## Quality findings
 
@@ -24,7 +24,7 @@ The test period has been opened **0** time(s). The stored data matches the commi
 |---|---:|---|
 | Instruments with missing candles | 14 (645 candles) | never filled in; an order waits for the next real candle |
 | Holes longer than a week | 7 | the instrument's history restarts (`max_gap_days` = 3): a ticker reused for another asset is a new instrument |
-| Candles with no trade / flat candles | 1 / 4 | liquidity rule keeps such instruments out |
+| Candles with no trade / flat candles | 1 / 3 | liquidity rule keeps such instruments out |
 | Moves above +200% / below -70% in one candle | 14 / 11 | kept: real crashes and listing spikes. The first 90 days after a listing are not tradable |
 | Wicks above 3x the candle body | 56 | kept; stops fill at their level or at the open, never at a wick |
 | Instruments without traded-value data | 0 | — |
@@ -63,7 +63,7 @@ Membership is decided from the past only and reviewed on the first day of each m
 
 ## Sealed test period (structure only)
 
-649 instruments, 420,354 candles; 294 of them were listed after the split and 143 stop before the period ends. Nothing else about this period is computed until it is opened.
+648 instruments, 420,320 candles; 293 of them were listed after the split and 143 stop before the period ends. Nothing else about this period is computed until it is opened.
 
 ## Archive against the exchange's live market-data API
 

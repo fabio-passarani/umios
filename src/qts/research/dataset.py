@@ -30,7 +30,7 @@ import yaml
 from qts.core.errors import DataError, QtsError
 from qts.core.provenance import code_version, data_version
 from qts.market_data.store import ParquetStore
-from qts.market_data.universe import UniverseRules
+from qts.market_data.universe import UniverseRules, classify
 
 
 class SealedDataError(QtsError):
@@ -100,11 +100,13 @@ class SealedDataset:
         suffix = f"_{self.spec.quote.upper()}"
         if not root.is_dir():
             raise DataError(f"no stored data under {root}: download the universe first")
-        return sorted(
+        names = (
             f"{p.name[: -len(suffix)]}/{self.spec.quote.upper()}"
             for p in root.iterdir()
             if p.name.endswith(suffix) and (p / f"{self.spec.timeframe}.parquet").is_file()
         )
+        # the exclusion rules are part of what the dataset is, whatever the store holds
+        return sorted(name for name in names if classify(name) is None)
 
     def _read(self, symbol: str) -> pd.DataFrame:
         frame = self.store.read(self.spec.exchange, symbol, self.spec.timeframe, self.spec.start)
