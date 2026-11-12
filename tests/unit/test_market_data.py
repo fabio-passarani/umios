@@ -189,3 +189,30 @@ def test_update_history_is_incremental_and_idempotent(tmp_path: Path) -> None:
     assert update_history(config, source, store)["BTC/USDT"].rows == 70
     loaded = load_universe(config, store)["BTC/USDT"]
     assert loaded["close"].tolist() == candles["close"].tolist()
+
+
+def test_off_grid_candles_are_dropped_not_realigned() -> None:
+    """Real case: hourly candles that open 28 minutes late after an exchange outage."""
+    from qts.market_data.sources.binance_vision import drop_off_grid
+
+    index = pd.DatetimeIndex(
+        [
+            "2018-02-08 00:00",
+            "2018-02-08 01:00",
+            "2018-02-09 09:28:14.789",
+            "2018-02-09 10:28:14.789",
+            "2018-02-10 00:00",
+        ],
+        tz="UTC",
+        name="timestamp",
+    )
+    frame = pd.DataFrame(
+        {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0}, index=index
+    )
+    cleaned = drop_off_grid(frame, "1h", "BTC/USDT")
+    assert list(cleaned.index) == [index[0], index[1], index[4]]  # nothing was moved
+    assert check_quality(cleaned, "1h").ok
+    assert check_quality(cleaned, "1h").missing_candles > 0  # the hole is visible as such
+    assert (
+        len(drop_off_grid(frame.iloc[[0, 1, 4]], "1d", "BTC/USDT")) == 2
+    )  # 01:00 is off the daily grid

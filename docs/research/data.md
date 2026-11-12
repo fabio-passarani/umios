@@ -62,6 +62,8 @@ Assets that collapsed or were delisted (LUNA, FTT, SRM, …) are **kept**.
 | Delisting | the instrument leaves the universe the day after its last candle; a position still open has to be closed (execution model) |
 | Renames (ERD → EGLD, LEND → AAVE) | appear as a delisting followed by a new listing. Treated as such: conservative, a forced exit and a waiting period |
 | A pair whose files contain impossible values (one case: negative volume) | rejected by the quality checks at download and left out |
+| Candles that open off the timeframe's grid (hourly candles 28 minutes late after the exchange outage of 8–9 February 2018, on the oldest pairs) | dropped and counted; they become missing candles. Never moved onto the grid: that would invent candles |
+| Short exchange outages (16 four-hour candles missing on BTC in 2018–2023) | missing candles, as above |
 
 ## Who was tradable when
 

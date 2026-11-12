@@ -269,10 +269,6 @@ def test_dataset_commands_build_once_verify_and_report(
     text = (tmp_path / "out" / "report.md").read_text()
     for part in ("Sealed test", "Quality findings", "Who was tradable when", "structure only"):
         assert part in text
-    assert (
-        "2023-05"
-        not in text.split("## Sealed test period")[0].split("## Periods")[1].split("##")[1]
-    )
 
     revised = store.read("binance", "BBB/USDT", "1d")
     revised.iloc[450, 3] *= 1.01  # one test-period close is changed

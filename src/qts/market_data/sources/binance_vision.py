@@ -30,7 +30,7 @@ import pandas as pd
 
 from qts.core.errors import DataError
 from qts.core.logging import get_logger
-from qts.market_data.schema import normalize_ohlcv
+from qts.market_data.schema import bar_duration, normalize_ohlcv
 from qts.market_data.sources.base import MarketDataSource
 
 log = get_logger("market_data.binance_vision")
@@ -72,6 +72,23 @@ def parse_klines_csv(raw: bytes) -> pd.DataFrame:
             out[name] = pd.to_numeric(full.iloc[:, position]).astype("float64").to_numpy()
     out.insert(0, "timestamp", pd.DatetimeIndex(timestamps))
     return out
+
+
+def drop_off_grid(df: pd.DataFrame, timeframe: str, symbol: str) -> pd.DataFrame:
+    """Remove candles whose open time is not on the timeframe's grid.
+
+    The archive contains a few: after the exchange's outage of 8-9 February
+    2018 some hourly candles of the oldest pairs open 28 minutes late. They are
+    dropped — and become ordinary missing candles — rather than moved onto the
+    grid, which would invent candles that never existed.
+    """
+    step = bar_duration(timeframe).value
+    on_grid = pd.DatetimeIndex(df.index).as_unit("ns").asi8 % step == 0
+    dropped = int((~on_grid).sum())
+    if dropped:
+        log.warning("off_grid_candles_dropped", symbol=symbol, timeframe=timeframe, count=dropped)
+    kept: pd.DataFrame = df.loc[on_grid]
+    return kept
 
 
 class BinanceVisionSource(MarketDataSource):
@@ -203,7 +220,7 @@ class BinanceVisionSource(MarketDataSource):
                 day += timedelta(days=1)
         if not frames:
             return pd.DataFrame()
-        df = normalize_ohlcv(pd.concat(frames, ignore_index=True))
+        df = drop_off_grid(normalize_ohlcv(pd.concat(frames, ignore_index=True)), timeframe, symbol)
         return df.loc[df.index < pd.Timestamp(end, tz="UTC") + pd.Timedelta(days=1)]
 
     def fetch_ohlcv(self, symbol: str, timeframe: str, start: date, end: date) -> pd.DataFrame:
@@ -239,7 +256,7 @@ class BinanceVisionSource(MarketDataSource):
                 day += timedelta(days=1)
         if not frames:
             raise DataError(f"no data found for {symbol} between {start} and {end}")
-        df = normalize_ohlcv(pd.concat(frames, ignore_index=True))
+        df = drop_off_grid(normalize_ohlcv(pd.concat(frames, ignore_index=True)), timeframe, symbol)
         lo = pd.Timestamp(start, tz="UTC")
         hi = pd.Timestamp(end, tz="UTC") + pd.Timedelta(days=1)
         df = df.loc[(df.index >= lo) & (df.index < hi)]
