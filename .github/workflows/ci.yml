@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, develop, "claude/**"]
   pull_request:
+  # Manual start from the Actions tab (or the API), e.g. when a run got stuck.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,8 +22,8 @@ jobs:
     name: Lint, format, types
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -56,15 +58,19 @@ jobs:
     env:
       QTS_TEST_DATABASE_URL: postgresql://postgres:ci-only-password@127.0.0.1:5432/qts_test
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: pip install -e ".[dev,reporting,ai]" ${{ matrix.pip_args }}
       - run: pytest --cov --cov-report=term-missing --cov-report=xml --cov-fail-under=85
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: matrix.python == '3.12'
+        # The coverage file is a convenience. The gate is the pytest step above
+        # (--cov-fail-under): a stuck upload must not turn passed tests red.
+        continue-on-error: true
+        timeout-minutes: 3
         with:
           name: coverage
           path: coverage.xml
@@ -73,8 +79,8 @@ jobs:
     name: Freqtrade adapter
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -85,7 +91,7 @@ jobs:
     name: Docker images and stack smoke test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: cp .env.example .env
       - run: docker compose --profile freqtrade --profile backup config --quiet
       - name: Build both images (platform and Freqtrade adapter)
@@ -113,7 +119,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: gitleaks
