@@ -96,8 +96,12 @@ jobs:
           docker run --rm --entrypoint python qts-freqtrade:local -c
           "import freqtrade, qts.integrations.freqtrade, pathlib;
           assert pathlib.Path('/freqtrade/user_data/strategies/qts_trend_following.py').is_file()"
-      - name: Start PostgreSQL and Grafana, check schema, read-only role and dashboard
+      - name: Start the stack, check schema version, database roles, kill switch and dashboard
         run: scripts/smoke_test.sh
+      - name: Take a backup and prove it can be restored (as an unprivileged host user)
+        run: |
+          test "$(id -u)" != 0
+          scripts/restore_test.sh
       - if: always()
         run: docker compose --profile freqtrade down -v
 

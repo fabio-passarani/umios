@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Smoke test of the Docker stack: PostgreSQL + schema + read-only Grafana role +
-# provisioned dashboard + kill switch round trip. Needs a populated .env and the
+# Smoke test of the Docker stack: PostgreSQL + versioned schema + least-privilege
+# database roles + provisioned dashboard + kill switch round trip. Needs a populated .env and the
 # images already built (`docker compose build`). Used by CI; safe to run locally:
 # it only creates the schema and toggles the kill switch on and off.
 set -euo pipefail
@@ -16,13 +16,40 @@ psql_as() {  # psql_as <user> <password> <sql>
 }
 
 docker compose up -d --wait postgres
-docker compose up -d grafana
+docker compose up -d grafana   # also runs db-setup (roles) and migrate (schema) to completion
 
 echo "== schema"
-qts db init
+qts db current || fail "the database is not at the schema revision this code needs"
 tables="$(psql_as "$POSTGRES_USER" "$POSTGRES_PASSWORD" \
     "select count(*) from information_schema.tables where table_schema = 'public'")"
-[ "$tables" -ge 10 ] || fail "expected at least 10 tables, found $tables"
+[ "$tables" -ge 11 ] || fail "expected at least 11 tables, found $tables"
+
+echo "== the application role can use the data and nothing else"
+denied() {  # denied <description> <user> <password> <sql>
+    if psql_as "$2" "$3" "$4" >/dev/null 2>&1; then fail "$2 was able to $1"; fi
+}
+psql_as qts_app "$QTS_APP_DB_PASSWORD" \
+    "insert into system_events (ts, level, component, message) values (now(), 'info', 'smoke', 'ok')" \
+    >/dev/null || fail "qts_app cannot write data"
+[ "$(psql_as qts_app "$QTS_APP_DB_PASSWORD" 'select rolsuper from pg_roles where rolname = current_user')" = "f" ] \
+    || fail "qts_app is a superuser"
+denied "create a table"          qts_app "$QTS_APP_DB_PASSWORD" "create table smoke_x (i int)"
+denied "drop a table"            qts_app "$QTS_APP_DB_PASSWORD" "drop table fills"
+denied "truncate a table"        qts_app "$QTS_APP_DB_PASSWORD" "truncate fills"
+denied "alter a table"           qts_app "$QTS_APP_DB_PASSWORD" "alter table runs add column smoke int"
+denied "change the schema version" qts_app "$QTS_APP_DB_PASSWORD" "update alembic_version set version_num = 'x'"
+denied "create a role"           qts_app "$QTS_APP_DB_PASSWORD" "create role smoke_evil superuser"
+if docker compose exec -T -e PGPASSWORD="$QTS_APP_DB_PASSWORD" postgres \
+    psql -h 127.0.0.1 -U qts_app -d freqtrade -c 'select 1' >/dev/null 2>&1; then
+    fail "qts_app can connect to the freqtrade database"
+fi
+if docker compose exec -T -e PGPASSWORD="$FREQTRADE_DB_PASSWORD" postgres \
+    psql -h 127.0.0.1 -U freqtrade_app -d "$POSTGRES_DB" -c 'select 1' >/dev/null 2>&1; then
+    fail "freqtrade_app can connect to the platform database"
+fi
+docker compose exec -T -e PGPASSWORD="$FREQTRADE_DB_PASSWORD" postgres \
+    psql -h 127.0.0.1 -U freqtrade_app -d freqtrade -qc 'create table smoke_t (i int); drop table smoke_t' \
+    || fail "freqtrade_app cannot manage its own database"
 
 echo "== Grafana database role is read-only"
 psql_as grafana_ro "$GRAFANA_DB_PASSWORD" "select count(*) from runs" >/dev/null \

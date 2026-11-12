@@ -22,6 +22,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import URL
 
 from qts.core.errors import ConfigError, LiveTradingDisabledError
 from qts.core.types import TradingMode
@@ -194,7 +195,16 @@ class Settings(BaseSettings):
     )
 
     config_file: Path = Path("configs/default.yaml")
-    database_url: SecretStr = SecretStr("sqlite:///state/qts.sqlite")
+    #: Full SQLAlchemy URL. Convenient locally; in deployments prefer the
+    #: ``db_*`` parts below, which need no URL-escaping of the password.
+    database_url: SecretStr | None = None
+    db_host: str | None = None
+    db_port: int = 5432
+    db_name: str = "qts"
+    db_user: str = "qts_app"
+    db_password: SecretStr | None = None
+    #: File holding the password (Docker / Kubernetes secret); wins over ``db_password``.
+    db_password_file: Path | None = None
     state_dir: Path = Path("state")
     log_level: str = "INFO"
     log_json: bool = True
@@ -202,6 +212,36 @@ class Settings(BaseSettings):
     live_trading_confirmation: str = ""
     exchange_api_key: SecretStr | None = None
     exchange_api_secret: SecretStr | None = None
+
+    def resolved_database_url(self) -> str:
+        """Database URL to use, in order: explicit URL, ``db_*`` parts, local SQLite.
+
+        Built from parts the password is escaped properly, so it may contain
+        ``@``, ``/`` or ``:``. Never log the return value.
+        """
+        if self.database_url is not None:
+            return self.database_url.get_secret_value()
+        if self.db_host is None:
+            return "sqlite:///state/qts.sqlite"
+        if self.db_password_file is not None:
+            try:
+                password = self.db_password_file.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                raise ConfigError(
+                    f"cannot read the database password file ({type(exc).__name__})"
+                ) from exc
+        elif self.db_password is not None:
+            password = self.db_password.get_secret_value()
+        else:
+            raise ConfigError("QTS_DB_HOST is set but no QTS_DB_PASSWORD / QTS_DB_PASSWORD_FILE")
+        return URL.create(
+            "postgresql+psycopg",
+            username=self.db_user,
+            password=password,
+            host=self.db_host,
+            port=self.db_port,
+            database=self.db_name,
+        ).render_as_string(hide_password=False)
 
 
 LIVE_CONFIRMATION_PHRASE = "I-ACCEPT-REAL-MONEY-RISK"

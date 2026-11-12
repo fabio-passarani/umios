@@ -23,7 +23,10 @@ COPY configs ./configs
 RUN mkdir -p /app/data /app/state /app/reports && chown -R qts:qts /app
 USER qts
 
+# Commit the image was built from, recorded with every result (see docs/validation.md).
+ARG GIT_COMMIT=unknown
 ENV QTS_CONFIG_FILE=/app/configs/default.yaml \
-    QTS_STATE_DIR=/app/state
+    QTS_STATE_DIR=/app/state \
+    QTS_GIT_COMMIT=${GIT_COMMIT}
 ENTRYPOINT ["qts"]
 CMD ["--help"]

@@ -348,12 +348,12 @@ def _database_sinks(
     configured (``QTS_DATABASE_URL``), so they appear on the same dashboard as
     the paper trader's. Without it — or if it is unreachable at start-up — the
     structured log remains the journal and the bot still runs."""
-    if "QTS_DATABASE_URL" not in os.environ:
+    if "QTS_DATABASE_URL" not in os.environ and settings.db_host is None:
         return None, None, None
     try:
         from qts.integrations.db.storage import Storage  # local: optional dependency path
 
-        storage = Storage(settings.database_url.get_secret_value())
+        storage = Storage(settings.resolved_database_url())
         storage.init_schema()
         run = storage.active_run(SERVICE)
         fingerprint = config.fingerprint()
