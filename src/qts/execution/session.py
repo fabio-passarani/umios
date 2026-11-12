@@ -63,6 +63,8 @@ class _Pending:
     kind: str  # "entry" | "exit"
     stop_distance: float = math.nan
     reason: OrderReason = OrderReason.EXIT_SIGNAL
+    #: Share of the position an exit closes (1.0 = all of it).
+    fraction: float = 1.0
 
 
 class TradingSession:
@@ -105,12 +107,19 @@ class TradingSession:
         )
 
     def _sell(
-        self, position: Position, price: float, reason: OrderReason, now: datetime
+        self,
+        position: Position,
+        price: float,
+        reason: OrderReason,
+        now: datetime,
+        fraction: float = 1.0,
     ) -> Fill | None:
+        """Reduce or close a position through the risk engine's reduce-only path."""
+        share = fraction if math.isfinite(fraction) and 0.0 < fraction < 1.0 else 1.0
         order = Order(
             symbol=position.symbol,
             side=Side.SELL,
-            quantity=position.quantity,
+            quantity=position.quantity * share,
             reference_price=price,
             reason=reason,
             strategy=self.strategy_name,
@@ -118,6 +127,25 @@ class TradingSession:
         )
         _decision, fill = self.router.submit(order, self._context(now), price, now)
         return fill
+
+    def request_exit(
+        self, symbol: str, reason: OrderReason = OrderReason.MANUAL, fraction: float = 1.0
+    ) -> bool:
+        """Queue a manual, partial or emergency exit for the next open.
+
+        Returns ``False`` when there is nothing to close. The request replaces
+        any pending decision for the symbol: getting out has priority over a
+        queued entry or a strategy exit. It still goes through the risk engine
+        (reduce-only path) when it executes, so it is journaled like any order.
+        """
+        if reason is OrderReason.ENTRY:
+            raise ValueError("an exit request cannot carry the entry reason")
+        if not (math.isfinite(fraction) and 0.0 < fraction <= 1.0):
+            raise ValueError("fraction must be in (0, 1]")
+        if symbol not in self.portfolio.positions:
+            return False
+        self._pending[symbol] = _Pending("exit", reason=reason, fraction=fraction)
+        return True
 
     def _enter(self, symbol: str, open_price: float, stop_distance: float, now: datetime) -> None:
         if symbol in self.portfolio.positions:
@@ -157,7 +185,7 @@ class TradingSession:
             pending = self._pending.get(symbol)
             position = self.portfolio.positions.get(symbol)
             if pending is not None and pending.kind == "exit" and position is not None:
-                self._sell(position, bars[symbol].open, pending.reason, timestamp)
+                self._sell(position, bars[symbol].open, pending.reason, timestamp, pending.fraction)
         for symbol in symbols:
             pending = self._pending.get(symbol)
             if pending is not None and pending.kind == "entry":
@@ -172,9 +200,12 @@ class TradingSession:
                 continue
             bar = bars[symbol]
             if bar.low <= position.stop_price:
-                self._sell(
-                    position, min(bar.open, position.stop_price), OrderReason.STOP_LOSS, timestamp
+                reason = (
+                    OrderReason.TRAILING_STOP
+                    if position.stop_is_trailing
+                    else OrderReason.STOP_LOSS
                 )
+                self._sell(position, min(bar.open, position.stop_price), reason, timestamp)
 
         # 3) mark to market and let the risk engine update its circuit breakers
         for symbol in symbols:
@@ -201,6 +232,7 @@ class TradingSession:
                     candidate = position.highest_close - signal.trail_distance
                     if position.stop_price is None or candidate > position.stop_price:
                         position.stop_price = candidate
+                        position.stop_is_trailing = True
                 if flatten:
                     self._pending[symbol] = _Pending("exit", reason=OrderReason.KILL_SWITCH)
                 elif signal is not None and signal.exit:
@@ -234,6 +266,7 @@ class TradingSession:
                     "entry_fees": p.entry_fees,
                     "stop_price": p.stop_price,
                     "highest_close": p.highest_close,
+                    "stop_is_trailing": p.stop_is_trailing,
                 }
                 for p in self.portfolio.positions.values()
             ],
@@ -242,6 +275,7 @@ class TradingSession:
                     "kind": p.kind,
                     "stop_distance": p.stop_distance if math.isfinite(p.stop_distance) else None,
                     "reason": p.reason.value,
+                    "fraction": p.fraction,
                 }
                 for s, p in self._pending.items()
             },
@@ -262,6 +296,7 @@ class TradingSession:
                 entry_fees=float(p["entry_fees"]),
                 stop_price=p["stop_price"],
                 highest_close=p["highest_close"],
+                stop_is_trailing=bool(p.get("stop_is_trailing", False)),
             )
             for p in state["positions"]
         }
@@ -270,6 +305,7 @@ class TradingSession:
                 p["kind"],
                 float(p["stop_distance"]) if p["stop_distance"] is not None else math.nan,
                 OrderReason(p["reason"]),
+                float(p.get("fraction", 1.0)),
             )
             for s, p in state["pending"].items()
         }

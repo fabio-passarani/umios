@@ -91,6 +91,9 @@ services:
       QTS_CONFIG_FILE: /freqtrade/configs/paper.yaml
       QTS_STATE_DIR: /freqtrade/state
       QTS_ENABLE_LIVE_TRADING: "false"
+      # Risk decisions (entries and exits) of the bot are journaled in the platform
+      # database, next to the paper trader's, so the dashboard shows both.
+      QTS_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     command:
       - trade
       - --dry-run

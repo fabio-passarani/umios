@@ -25,7 +25,7 @@ from qts.backtesting.validation import run_validation
 from qts.core.config import AppConfig, Settings, enforce_mode, load_config
 from qts.core.errors import ConfigError, QtsError
 from qts.core.logging import configure_logging, get_logger
-from qts.core.types import TradingMode
+from qts.core.types import OrderReason, TradingMode
 from qts.execution.paper import PaperTrader
 from qts.integrations.db.storage import Storage
 from qts.market_data.freqtrade_export import export_to_freqtrade
@@ -290,6 +290,30 @@ def paper_stop(config: ConfigOption = None) -> None:
     """Close the active paper session."""
     rt = Runtime(config)
     typer.echo(f"Stopped: {_trader(rt, False).stop()}")
+
+
+@paper_app.command("close")
+@_guard
+def paper_close(
+    config: ConfigOption = None,
+    symbol: Annotated[
+        list[str] | None, typer.Option(help="Symbol to close (repeatable); omit with --all")
+    ] = None,
+    everything: Annotated[bool, typer.Option("--all", help="Close every open position")] = False,
+    fraction: Annotated[
+        float, typer.Option(min=0.0001, max=1.0, help="Share of each position to close")
+    ] = 1.0,
+    emergency: Annotated[
+        bool, typer.Option(help="Record the exit as an emergency instead of manual")
+    ] = False,
+) -> None:
+    """Close or reduce open paper positions at the next open (works with the kill switch on)."""
+    rt = Runtime(config)
+    if bool(symbol) == everything:
+        raise ConfigError("give either --symbol (one or more) or --all")
+    reason = OrderReason.EMERGENCY if emergency else OrderReason.MANUAL
+    queued = _trader(rt, False).request_exit(None if everything else symbol, reason, fraction)
+    typer.echo(f"Exit queued for: {', '.join(queued) if queued else 'nothing (no open position)'}")
 
 
 @paper_app.command("status")

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 import pandas as pd
 
@@ -113,6 +114,41 @@ class PaperTrader:
         self.storage.record_event("info", SERVICE, f"paper session {run.id} stopped")
         return run.id
 
+    def request_exit(
+        self,
+        symbols: list[str] | None = None,
+        reason: OrderReason = OrderReason.MANUAL,
+        fraction: float = 1.0,
+    ) -> list[str]:
+        """Operator action: close (or partly close) open positions at the next open.
+
+        ``symbols=None`` means every open position (emergency flatten). The
+        request is stored in the session state and executed by the next
+        :meth:`step` through the risk engine's reduce-only path, so it works
+        with the kill switch active and is journaled like any other order.
+        Returns the symbols for which an exit was queued.
+        """
+        run = self.storage.active_paper_run()
+        if run is None:
+            raise ConfigError("no active paper session")
+        state = self.storage.load_paper_state(run.id)
+        if state is None:
+            raise ConfigError(f"paper session {run.id} has no saved state")
+        session = build_session(self.config, self.strategy, TradingMode.PAPER, self.kill_switch)
+        session.restore(state)
+        targets = symbols if symbols is not None else sorted(session.portfolio.positions)
+        queued = [s for s in targets if session.request_exit(s, reason, fraction)]
+        if queued:
+            # Only the pending decisions change: equity peak and everything else stay as saved.
+            state["pending"] = session.snapshot()["pending"]
+            self.storage.save_paper_state(run.id, state)
+            self.storage.record_event(
+                "warning",
+                SERVICE,
+                f"{reason.value} exit requested for {', '.join(queued)} (fraction {fraction:g})",
+            )
+        return queued
+
     # --------------------------------------------------------------------- step
     def step(self, now: datetime | None = None) -> PaperStepReport:
         """Process all candles closed since the previous step."""
@@ -160,8 +196,16 @@ class PaperTrader:
                 history = frame.loc[frame.index <= pd.Timestamp(last_done)]
                 if not history.empty:
                     session.last_close[symbol] = float(history["close"].iloc[-1])
-        for timestamp, bars, rows in timeline:
-            session.process_bar(timestamp.to_pydatetime(), bars, rows)
+        try:
+            for timestamp, bars, rows in timeline:
+                session.process_bar(timestamp.to_pydatetime(), bars, rows)
+        except QtsError as exc:
+            # The broker (or anything on the order path) failed in the middle of a
+            # bar. The in-memory session is half-advanced and must not be saved:
+            # keep the last committed state, count the failure, and let the next
+            # step redo these candles from scratch.
+            self._register_failure(run.id, state, now, f"execution problem: {exc}")
+            raise
 
         benchmark = None
         if session.equity_curve:
@@ -192,6 +236,24 @@ class PaperTrader:
         return report
 
     # ------------------------------------------------------------------ helpers
+    def _register_failure(
+        self, run_id: str, state: dict[str, Any], now: datetime, detail: str
+    ) -> None:
+        """Count an operational failure against the saved state without advancing it."""
+        journal = RiskJournal()
+        clean = build_session(
+            self.config, self.strategy, TradingMode.PAPER, self.kill_switch, journal
+        )
+        clean.restore(state)
+        clean.risk.record_error(now, detail)
+        kept = dict(state)
+        kept["risk"] = clean.risk.snapshot()
+        with self.storage.transaction():
+            self.storage.save_paper_state(run_id, kept)
+            self.storage.add_risk_events(run_id, journal.events)
+        self.storage.record_event("error", SERVICE, detail)
+        self.storage.heartbeat(SERVICE, "degraded", detail)
+
     def _check_freshness(self, data: dict[str, pd.DataFrame], now: datetime) -> None:
         limit = pd.Timedelta(hours=self.config.risk.max_data_age_hours)
         bar = TIMEFRAME_TO_FREQ[self.config.market.timeframe]

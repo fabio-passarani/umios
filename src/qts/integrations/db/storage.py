@@ -181,13 +181,17 @@ class Storage:
         with self.session() as s:
             return s.get(Run, run_id)
 
-    def active_paper_run(self) -> Run | None:
+    def active_run(self, kind: str) -> Run | None:
+        """The running session of a given kind (``paper``, ``freqtrade``), if any."""
         with self.session() as s:
             return s.scalars(
                 select(Run)
-                .where(Run.kind == "paper", Run.status == "running")
+                .where(Run.kind == kind, Run.status == "running")
                 .order_by(Run.started_at.desc())
             ).first()
+
+    def active_paper_run(self) -> Run | None:
+        return self.active_run("paper")
 
     # ------------------------------------------------------------ time series
     def append_equity(

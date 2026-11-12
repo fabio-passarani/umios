@@ -10,9 +10,12 @@ Design rules:
    engine signed (HMAC) and has not yet consumed. An approval is bound to what
    was evaluated: it is valid only immediately, only at the approved price, and
    a newer entry approval revokes any unused older one.
-4. **Fail closed** — any doubt (bad numbers, stale data, tripped kill switch,
-   live mode) rejects. Risk-*reducing* sells stay possible so positions can
-   always be closed.
+4. **Fail closed for exposure, never for reductions** — any doubt (bad numbers,
+   stale data, tripped kill switch) rejects an *entry*. An order that only
+   reduces an existing position goes through the **reduce-only path**: it is
+   judged solely on "is it an exit, and does it stay within what is held?".
+   Kill switch, daily halt, drawdown, stale data, a broken cash figure or a
+   symbol dropped from the whitelist can never stand in the way of getting out.
 5. **Everything is journaled** — approvals and rejections, with every check.
 """
 
@@ -210,12 +213,12 @@ class RiskEngine:
     # ------------------------------------------------------------- evaluation
     def evaluate(self, order: Order, context: RiskContext) -> RiskDecision:
         """Run every applicable check and return a journaled decision."""
-        checks = self._sanity_checks(order, context)
-        if all(c.passed for c in checks):
-            if order.side is Side.BUY:
+        if order.side is Side.BUY:
+            checks = self._sanity_checks(order, context)
+            if all(c.passed for c in checks):
                 checks += self._entry_checks(order, context)
-            else:
-                checks += self._exit_checks(order, context)
+        else:
+            checks = self._reduction_checks(order, context)
         approved = all(c.passed for c in checks)
         approval = self._issue(order, context.now) if approved else None
         decision = RiskDecision(order, approved, tuple(checks), context.now, approval)
@@ -256,15 +259,42 @@ class RiskEngine:
             ),
         ]
 
-    def _exit_checks(self, order: Order, ctx: RiskContext) -> list[CheckResult]:
+    def _reduction_checks(self, order: Order, ctx: RiskContext) -> list[CheckResult]:
+        """The reduce-only path: everything a sell is judged on.
+
+        Deliberately minimal. It looks only at the order and at the position it
+        closes — not at cash, other positions, prices, data age, the whitelist,
+        the kill switch or any circuit breaker — because none of those is a
+        reason to stay in a position. What it does enforce is that the order
+        really is a reduction: an exit reason, and no more than what is held
+        (no short selling, no flipping).
+        """
         held = ctx.positions.get(order.symbol, 0.0)
-        covered = order.quantity <= held + _TOLERANCE
+        numbers = [order.quantity, order.reference_price, held]
+        sane = (
+            all(math.isfinite(v) for v in numbers)
+            and order.quantity > 0
+            and order.reference_price > 0
+        )
+        is_exit = order.reason is not OrderReason.ENTRY
+        covered = sane and order.quantity <= held + _TOLERANCE
         return [
+            CheckResult(
+                "trading_mode",
+                self.mode in (TradingMode.BACKTEST, TradingMode.PAPER),
+                "" if self.mode is not TradingMode.LIVE else "live trading is disabled",
+            ),
+            CheckResult(
+                "order_sanity", sane, "" if sane else "non-finite or non-positive quantity/price"
+            ),
+            CheckResult(
+                "exit_reason", is_exit, "" if is_exit else "a sell cannot carry the entry reason"
+            ),
             CheckResult(
                 "no_short_selling",
                 covered,
                 "" if covered else f"sell {order.quantity} exceeds position {held}",
-            )
+            ),
         ]
 
     def _entry_checks(self, order: Order, ctx: RiskContext) -> list[CheckResult]:
