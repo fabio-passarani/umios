@@ -15,7 +15,7 @@ Two sources, on purpose:
 |---|---|---|
 | `mode` | `backtest` | `backtest` or `paper`. `live` is refused by every command |
 | `market.symbols` | BTC/USDT, ETH/USDT | traded universe (`BASE/QUOTE`) |
-| `market.timeframe` | `1d` | only daily candles are supported |
+| `market.timeframe` | `1d` | `1d`, `4h` or `1h`. Indicator windows are counted in candles, so the same parameters are a different strategy on another timeframe. Paper trading and the Freqtrade adapter are daily only |
 | `data.directory` | `data` | where candles are stored (Parquet) |
 | `data.start` | 2018-01-01 | first candle used |
 | `data.end` | — | last candle used. **Set it in any configuration whose results you publish**: with an open end the period grows every day. `configs/default.yaml` pins it; `configs/paper.yaml` leaves it open because it trades forward |

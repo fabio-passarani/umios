@@ -221,3 +221,62 @@ def test_dataset_spec_is_validated() -> None:
     spec = DatasetSpec(name="ok")
     assert spec.split == pd.Timestamp("2024-01-01", tz="UTC")
     assert np.isfinite(spec.rules.min_quote_volume)
+
+
+def test_dataset_commands_build_once_verify_and_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import yaml
+    from typer.testing import CliRunner
+
+    from qts.cli import app
+    from qts.core.config import AppConfig
+
+    store = ParquetStore(tmp_path / "data")
+    for i, symbol in enumerate(("AAA/USDT", "BBB/USDT", "CCC/USDT")):
+        store.write("binance", symbol, "1d", asset(500, "2022-01-01", 5e6 * (i + 1), i))
+    cfg = AppConfig.model_validate({"data": {"directory": str(tmp_path / "data")}})
+    (tmp_path / "cfg.yaml").write_text(yaml.safe_dump(cfg.model_dump(mode="json")))
+    spec = {
+        "name": "cli-test",
+        "start": "2022-01-01",
+        "development_end": "2022-12-31",
+        "test_end": "2023-05-15",
+        "rules": {"min_history_days": 30, "top_n": 2},
+    }
+    (tmp_path / "sets").mkdir()
+    (tmp_path / "sets" / "cli-test.yaml").write_text(yaml.safe_dump(spec))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("QTS_DATABASE_URL", f"sqlite:///{tmp_path / 'state' / 'qts.sqlite'}")
+    monkeypatch.setenv("QTS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("QTS_LOG_LEVEL", "CRITICAL")
+    runner = CliRunner()
+    args = ["-d", "sets/cli-test.yaml", "-c", "cfg.yaml"]
+
+    built = runner.invoke(app, ["dataset", "build", *args])
+    assert built.exit_code == 0, built.output
+    assert (tmp_path / "sets" / "cli-test.manifest.json").is_file()
+    again = runner.invoke(app, ["dataset", "build", *args])
+    assert again.exit_code == 1  # a frozen dataset is never rebuilt
+    assert "already exists" in again.output
+
+    verified = runner.invoke(app, ["dataset", "verify", *args])
+    assert verified.exit_code == 0, verified.output
+    assert "opened 0 time(s)" in verified.output
+
+    report = runner.invoke(app, ["dataset", "report", *args, "--output", "out/report.md"])
+    assert report.exit_code == 0, report.output
+    text = (tmp_path / "out" / "report.md").read_text()
+    for part in ("Sealed test", "Quality findings", "Who was tradable when", "structure only"):
+        assert part in text
+    assert (
+        "2023-05"
+        not in text.split("## Sealed test period")[0].split("## Periods")[1].split("##")[1]
+    )
+
+    revised = store.read("binance", "BBB/USDT", "1d")
+    revised.iloc[450, 3] *= 1.01  # one test-period close is changed
+    store.write("binance", "BBB/USDT", "1d", revised)
+    broken = runner.invoke(app, ["dataset", "verify", *args])
+    assert broken.exit_code == 1
+    assert "BBB/USDT (test)" in broken.output
