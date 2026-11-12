@@ -4,6 +4,8 @@ on:
   push:
     branches: [main, develop, "claude/**"]
   pull_request:
+  # Manual start from the Actions tab (or the API), e.g. when a run got stuck.
+  workflow_dispatch:
 
 permissions:
   contents: read
