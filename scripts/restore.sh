@@ -15,7 +15,7 @@ dump="" yes=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --dump) dump="$2"; shift 2 ;;
-        --latest) dump="$(newest 'backups/qts-2*.sql.gz')"; shift ;;
+        --latest) dump="$(newest "$BACKUPS/qts-2*.sql.gz")"; shift ;;
         --yes) yes=1; shift ;;
         *) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
     esac

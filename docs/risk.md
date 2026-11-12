@@ -17,10 +17,36 @@ Implementation: `qts.risk`. Limits: the `risk:` section of the YAML config.
    the same account snapshot can never both execute).
 4. **Fail closed.** Bad numbers, stale data, unknown price, tripped kill switch or
    live mode → reject.
-5. **Closing is always possible.** Sells that reduce a position pass even when the
-   kill switch is active (they still cannot exceed the position: no shorting).
+5. **Closing is always possible.** Anything that reduces a position goes through a
+   separate *reduce-only* path (below) that none of the entry conditions can block.
 6. **Everything is journaled.** Each decision records every check; decisions and
    events go to the log and to the database (`risk_decisions`, `risk_events`).
+
+## Authorisation model
+
+Every order, from the platform's own session or from Freqtrade, is one of two kinds:
+
+| | New exposure (entry) | Reduction (any exit) |
+|---|---|---|
+| Reasons | `entry` | `exit_signal`, `stop_loss`, `trailing_stop`, `take_profit`, `manual`, `emergency`, `kill_switch` |
+| Judged on | the order, the whole account, market data, every limit and circuit breaker | the order and the position it closes: is it an exit, are the numbers sane, is it no more than what is held |
+| In doubt | **rejected** (fail closed) | **authorised** (fail open) |
+| Blocked by kill switch, daily halt, drawdown, stale data, bad cash figure, de-listed symbol | yes | never |
+| Can it be refused at all | yes | only if it is not a reduction: more than the position (a short), an entry reason, or nonsense numbers |
+| Journaled | yes | yes |
+
+How each case is handled:
+
+| Case | Platform session (backtest / paper) | Freqtrade dry-run |
+|---|---|---|
+| Stop loss | checked against each candle's low; a gap fills at the open | stop price fixed when the entry fills and stored with the trade; Freqtrade enforces it; the exit is authorised and journaled |
+| Trailing stop | ratchets up from the highest close; reported as `trailing_stop` | same rule; highest level stored with the trade |
+| Take profit | no rule in the current strategy; the reason exists for partial closes by the operator | Freqtrade ROI exits map to `take_profit` |
+| Partial close | `qts paper close --fraction`; the stop stays on the remainder | journaled when the partial fills |
+| Emergency close | `qts paper close --all --emergency`, or `flatten_on_kill_switch` | `custom_exit` closes everything when the kill switch is on and `flatten_on_kill_switch` is set |
+| Manual close | `qts paper close --symbol` | force-exit in the UI/API, journaled as `manual` |
+| Exchange / broker error | the step is abandoned, the last committed state kept, the failure counted; three in a row trip the kill switch; the next step redoes the candles | entries fail closed on any exception; failures are counted the same way; exits are never held back |
+| Restart with an open position | state (position, stop, pending orders, risk limits) is reloaded from the database | open trades and their stops come from Freqtrade's database, circuit-breaker state from `freqtrade_risk_state.json` |
 
 ## Checks on every entry
 

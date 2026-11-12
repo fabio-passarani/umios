@@ -1,0 +1,42 @@
+# Overlay for the end-to-end test (scripts/e2e_paper_test.sh). Used together with
+# `-p qts-e2e`, so it has its own containers, network and volumes and never touches
+# a real stack on the same machine; ports are moved for the same reason.
+#   - the platform runs on a prepared synthetic history (tests/e2e) instead of
+#     downloading market data;
+#   - `cli` is an idle container of the platform image in which the test issues
+#     the same `qts` commands an operator would.
+
+x-e2e: &e2e
+  environment:
+    QTS_CONFIG_FILE: /app/tests/e2e/paper-e2e.yaml
+    QTS_LOG_LEVEL: ERROR
+  volumes:
+    - ./tests:/app/tests:ro
+
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:${E2E_POSTGRES_PORT:-55433}:5432"
+  grafana:
+    ports: !override
+      - "127.0.0.1:${E2E_GRAFANA_PORT:-53000}:3000"
+  migrate:
+    <<: *e2e
+  paper-trader:
+    <<: *e2e
+    profiles: ["disabled"]  # the test drives the steps itself, one candle at a time
+  backup-scheduler:
+    profiles: ["disabled"]
+  cli:
+    extends:
+      file: docker-compose.yml
+      service: paper-trader
+    environment:
+      QTS_CONFIG_FILE: /app/tests/e2e/paper-e2e.yaml
+      QTS_LOG_LEVEL: ERROR
+    volumes:
+      - ./tests:/app/tests:ro
+      - ./tests/e2e/.work/driver:/e2e-work
+    restart: "no"
+    entrypoint: ["sleep", "infinity"]
+    command: []

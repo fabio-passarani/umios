@@ -302,6 +302,7 @@ class PaperTrader:
         self.storage.add_trades(run_id, session.portfolio.trades)
         self.storage.add_risk_decisions(run_id, journal.decisions)
         self.storage.add_risk_events(run_id, journal.events)
+        self.storage.add_signals(run_id, session.signal_log)
         self.storage.replace_positions(
             run_id, session.portfolio.positions.values(), session.last_close
         )

@@ -60,3 +60,4 @@ mlruns/
 .DS_Store
 Thumbs.db
 *.swp
+tests/e2e/.work/

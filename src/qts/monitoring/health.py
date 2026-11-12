@@ -29,6 +29,7 @@ def run_health_checks(
     kill_switch: KillSwitch,
     now: datetime | None = None,
     max_heartbeat_age_hours: float = 26.0,
+    heartbeat_limits: dict[str, float] | None = None,
 ) -> list[HealthCheck]:
     """Run every check; never raises (a failing check is a result, not a crash)."""
     now = now or datetime.now(tz=UTC)
@@ -66,7 +67,8 @@ def run_health_checks(
             for beat in storage.heartbeats():
                 ts = beat.ts if beat.ts.tzinfo else beat.ts.replace(tzinfo=UTC)
                 age_hours = (now - ts).total_seconds() / 3600.0
-                healthy = beat.status == "ok" and age_hours <= max_heartbeat_age_hours
+                limit_hours = (heartbeat_limits or {}).get(beat.service, max_heartbeat_age_hours)
+                healthy = beat.status == "ok" and age_hours <= limit_hours
                 checks.append(
                     HealthCheck(
                         f"service:{beat.service}",

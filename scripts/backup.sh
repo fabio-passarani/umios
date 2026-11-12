@@ -8,9 +8,9 @@
 #   scripts/restore.sh --help    restore a backup into the running stack
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
-mkdir -p backups
-chmod 700 backups
+source "$(dirname "$0")/lib.sh"
+mkdir -p "$BACKUPS"
+chmod 700 "$BACKUPS"
 
-docker compose run --rm backup
-echo "Backups in $(pwd)/backups (git-ignored). Copy them off this machine."
+dc run --rm backup
+echo "Backups in $(pwd)/$BACKUPS (git-ignored). Copy them off this machine."

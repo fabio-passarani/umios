@@ -12,9 +12,11 @@ import functools
 import json
 import time
 from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, TypeVar
 
+import pandas as pd
 import typer
 import yaml
 
@@ -33,7 +35,9 @@ from qts.market_data.schema import check_quality
 from qts.market_data.service import load_universe, update_history
 from qts.market_data.sources import BinanceVisionSource
 from qts.market_data.store import ParquetStore
+from qts.monitoring.daily import build_daily_report, render_daily_report, soak_status
 from qts.monitoring.health import run_health_checks
+from qts.monitoring.monitor import Monitor
 from qts.reporting.persist import save_backtest
 from qts.reporting.report import HEADLINE_METRICS, format_metric, write_validation_report
 from qts.risk.kill_switch import KillSwitch
@@ -43,10 +47,14 @@ data_app = typer.Typer(no_args_is_help=True, help="Historical market data")
 paper_app = typer.Typer(no_args_is_help=True, help="Paper trading (simulated, no real money)")
 risk_app = typer.Typer(no_args_is_help=True, help="Risk engine and kill switch")
 db_app = typer.Typer(no_args_is_help=True, help="Operational database")
+monitor_app = typer.Typer(no_args_is_help=True, help="Health monitoring service")
+report_app = typer.Typer(no_args_is_help=True, help="Daily and soak-test reports")
 app.add_typer(data_app, name="data")
 app.add_typer(paper_app, name="paper")
 app.add_typer(risk_app, name="risk")
 app.add_typer(db_app, name="db")
+app.add_typer(monitor_app, name="monitor")
+app.add_typer(report_app, name="report")
 
 log = get_logger("cli")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -311,6 +319,41 @@ def data_export_freqtrade(
         typer.echo(f"wrote {path}")
 
 
+@data_app.command("import-csv")
+@_guard
+def data_import_csv(
+    symbol: Annotated[str, typer.Option(help="Symbol the candles belong to, e.g. BTC/USDT")],
+    file: Annotated[Path, typer.Option(help="CSV with timestamp,open,high,low,close,volume")],
+    config: ConfigOption = None,
+) -> None:
+    """Merge candles from a CSV file into the store (same quality checks as a download).
+
+    For data that does not come from the built-in source, and for replaying a
+    prepared history in tests. Re-importing the same rows changes nothing.
+    """
+    rt = Runtime(config)
+    if symbol not in rt.config.market.symbols:
+        raise ConfigError(f"{symbol} is not one of the configured symbols")
+    if not file.is_file():
+        raise ConfigError(f"file not found: {file}")
+    frame = pd.read_csv(file, parse_dates=["timestamp"])
+    market = rt.config.market
+    rt.store.write(market.exchange, symbol, market.timeframe, frame)
+    stored = rt.store.read(market.exchange, symbol, market.timeframe)
+    typer.echo(
+        f"{symbol}: {len(frame)} rows read, store now holds {len(stored)} candles "
+        f"{stored.index[0]:%Y-%m-%d} -> {stored.index[-1]:%Y-%m-%d}"
+    )
+
+
+def _parse_time(value: str) -> datetime:
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ConfigError(f"not a timestamp: {value!r} (use e.g. 2026-01-31T00:30:00)") from exc
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
 # -------------------------------------------------------------------------- paper
 def _trader(rt: Runtime, refresh: bool) -> PaperTrader:
     if rt.mode is not TradingMode.PAPER:
@@ -337,10 +380,15 @@ def paper_start(
 def paper_step(
     config: ConfigOption = None,
     refresh: Annotated[bool, typer.Option(help="Download new candles first")] = True,
+    as_of: Annotated[
+        str | None,
+        typer.Option(help="Treat this UTC timestamp as 'now' (replays and tests only)"),
+    ] = None,
 ) -> None:
     """Process candles closed since the last step (safe to run repeatedly)."""
     rt = Runtime(config)
-    report = _trader(rt, refresh).step()
+    moment = _parse_time(as_of) if as_of else None
+    report = _trader(rt, refresh).step(now=moment)
     typer.echo(json.dumps({k: str(v) for k, v in report.__dict__.items()}, indent=2))
 
 
@@ -469,6 +517,119 @@ def risk_reset(
             rt.storage.save_paper_state(run.id, state)
     rt.storage.record_event("warning", "risk", f"kill switch reset by {operator}")
     typer.echo("Kill switch reset.")
+
+
+# ------------------------------------------------------------------------ monitor
+def _monitor(rt: Runtime, reports: Path | None) -> Monitor:
+    return Monitor(rt.config, rt.storage, rt.store, rt.kill_switch, reports)
+
+
+@monitor_app.command("once")
+@_guard
+def monitor_once(
+    config: ConfigOption = None,
+    reports: Annotated[Path | None, typer.Option(help="Also write daily reports here")] = None,
+) -> None:
+    """Run one monitoring cycle and record its result (exit 1 if anything is unhealthy)."""
+    rt = Runtime(config)
+    checks = _monitor(rt, reports).cycle()
+    for check in checks:
+        typer.echo(f"[{'OK' if check.ok else 'FAIL'}] {check.name}: {check.detail}")
+    if not all(c.ok for c in checks):
+        raise typer.Exit(code=1)
+
+
+@monitor_app.command("forget")
+@_guard
+def monitor_forget(
+    service: Annotated[str, typer.Argument(help="Service name as shown by `qts health`")],
+    config: ConfigOption = None,
+) -> None:
+    """Stop watching a service you switched off on purpose (e.g. `freqtrade`).
+
+    A service that has reported once is expected to keep reporting: without
+    this, stopping it deliberately would count as an outage for ever. It is
+    watched again as soon as it reports.
+    """
+    rt = Runtime(config)
+    known = rt.storage.forget_heartbeat(service)
+    rt.storage.record_event("warning", "monitor", f"service {service} no longer watched (operator)")
+    typer.echo(f"{service}: {'no longer watched' if known else 'was not being watched'}")
+
+
+@monitor_app.command("run")
+@_guard
+def monitor_run(
+    config: ConfigOption = None,
+    interval_minutes: Annotated[int, typer.Option(min=1)] = 5,
+    reports: Annotated[Path, typer.Option(help="Directory for the daily reports")] = Path(
+        "reports/daily"
+    ),
+) -> None:
+    """Long-running service: health checks every few minutes, daily reports."""
+    rt = Runtime(config)
+    monitor = _monitor(rt, reports)
+    while True:
+        try:
+            monitor.cycle()
+        except QtsError as exc:  # e.g. the database itself is down: keep trying
+            log.error("monitor_cycle_failed", error=type(exc).__name__, detail=str(exc))
+        time.sleep(interval_minutes * 60)
+
+
+# ------------------------------------------------------------------------- report
+@report_app.command("daily")
+@_guard
+def report_daily(
+    config: ConfigOption = None,
+    day: Annotated[str | None, typer.Option("--date", help="UTC date (default: yesterday)")] = None,
+    output: Annotated[Path | None, typer.Option(help="Write <date>.md and .json here")] = None,
+) -> None:
+    """Daily report of the active paper session: signals, orders, fills, health."""
+    rt = Runtime(config)
+    run = rt.storage.active_paper_run()
+    if run is None:
+        raise ConfigError("no active paper session")
+    now = datetime.now(tz=UTC)
+    try:
+        target = date.fromisoformat(day) if day else (now - timedelta(days=1)).date()
+    except ValueError as exc:
+        raise ConfigError(f"not a date: {day!r}") from exc
+    report = build_daily_report(rt.storage, run, target, now)
+    text = render_daily_report(report)
+    if output is not None:
+        output.mkdir(parents=True, exist_ok=True)
+        (output / f"{target.isoformat()}.md").write_text(text, encoding="utf-8")
+        (output / f"{target.isoformat()}.json").write_text(
+            json.dumps(report, indent=2), encoding="utf-8"
+        )
+    typer.echo(text)
+
+
+@report_app.command("soak")
+@_guard
+def report_soak(config: ConfigOption = None) -> None:
+    """Verdict on the continuous paper-trading test of the active session.
+
+    Exit code 0 = PASSED, 1 = FAILED, 2 = IN PROGRESS (fewer than the required
+    days have been recorded: nothing can be claimed yet).
+    """
+    rt = Runtime(config)
+    run = rt.storage.active_paper_run()
+    if run is None:
+        raise ConfigError("no active paper session")
+    status = soak_status(rt.storage, run, datetime.now(tz=UTC))
+    typer.echo(
+        f"Soak test of run {status['run_id']}: {status['verdict']} "
+        f"({status['elapsed_days']:.2f} of {status['required_days']} days)"
+    )
+    for item in status["criteria"]:
+        typer.echo(f"  [{'ok' if item['ok'] else '--'}] {item['name']}: {item['detail']}")
+    if status["verdict"] == "IN PROGRESS":
+        typer.echo("Not enough recorded time yet: this is not a pass.")
+        raise typer.Exit(code=2)
+    if status["verdict"] != "PASSED":
+        raise typer.Exit(code=1)
 
 
 # ----------------------------------------------------------------------------- db
