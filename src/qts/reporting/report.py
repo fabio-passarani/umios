@@ -399,7 +399,9 @@ def trades_frame(result: BacktestResult) -> pd.DataFrame:
     return pd.DataFrame([asdict(t) for t in result.trades])
 
 
-def write_tearsheet(returns: pd.Series, benchmark: pd.Series, path: Path, title: str) -> bool:
+def write_tearsheet(
+    returns: pd.Series, benchmark: pd.Series, path: Path, title: str, periods: int = 365
+) -> bool:
     """Write a QuantStats HTML tearsheet. Returns False if the optional
     ``reporting`` extra is not installed (the rest of the report is unaffected)."""
     try:
@@ -421,7 +423,7 @@ def write_tearsheet(returns: pd.Series, benchmark: pd.Series, path: Path, title:
         benchmark=bench.rename("Buy & Hold"),
         output=str(path),
         title=title,
-        periods_per_year=365,
+        periods_per_year=periods,
         compounded=True,
     )
     return True

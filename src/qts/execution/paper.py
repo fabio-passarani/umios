@@ -86,7 +86,7 @@ class PaperTrader:
         data = load_universe(self.config, self.store)
         last_bar = max(frame.index[-1] for frame in data.values())
         if start_from is not None:
-            cutoff = pd.Timestamp(start_from, tz="UTC") - TIMEFRAME_TO_FREQ["1d"]
+            cutoff = pd.Timestamp(start_from, tz="UTC") - self.config.bar
         else:
             cutoff = last_bar
         run_id = self.storage.create_run(
@@ -331,6 +331,10 @@ class PaperTrader:
             for t in self.storage.trades(run_id)
         ]
         metrics = compute_metrics(
-            curve["equity"], self.config.portfolio.initial_capital, trades, curve["exposure"]
+            curve["equity"],
+            self.config.portfolio.initial_capital,
+            trades,
+            curve["exposure"],
+            self.config.periods_per_year,
         )
         self.storage.update_metrics(run_id, metrics)

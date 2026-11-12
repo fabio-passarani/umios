@@ -8,7 +8,9 @@ Declared explicitly so nothing here is mistaken for a finished feature.
   are used. `LiveBroker` is a placeholder that raises.
 - **Markets other than crypto spot.** Equities, UCITS ETFs, FX, futures and
   Interactive Brokers are extension points only (`MarketDataSource`, `Broker`).
-- **Timeframes other than `1d`**, short selling, leverage, pyramiding.
+- **Short selling, leverage, pyramiding.** Backtests run on `1h`, `4h` and `1d`
+  candles; paper trading on intraday candles needs a live data source (the
+  archive publishes a day's candles the day after) and is not implemented.
 - **AI in the trading loop.** `qts.ai` trains, evaluates, tunes and explains a
   regime classifier, but no model output feeds the strategy.
 - **Alerting.** Errors are visible in logs, Grafana, `qts health` and the daily

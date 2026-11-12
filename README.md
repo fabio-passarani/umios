@@ -122,6 +122,8 @@ Understanding it:
 - [Risk engine](docs/risk.md) — the authorisation model, every check, the kill switch
 - [Backtesting and validation](docs/validation.md) — methodology, reproducibility, robustness,
   and the [latest real results](docs/results/2026-11-11-validation-pinned.md)
+- [Research data](docs/research/data.md) — survivorship-free universe, data defects and their
+  rules, the sealed test period; [current dataset](docs/research/dataset-binance-usdt-1d-v1.md)
 - [Freqtrade](docs/freqtrade.md) — how the integration works and how to run it
 - [Security](docs/security.md) — secrets, database accounts, what is and is not protected
 - [Licensing](docs/licensing.md) — dependency licences and why there is no `LICENSE` yet

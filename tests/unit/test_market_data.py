@@ -68,7 +68,8 @@ def test_fetch_assembles_months_and_skips_missing_ones() -> None:
     frame = source.fetch_ohlcv("BTC/USDT", "1d", date(2023, 11, 1), date(2025, 1, 31))
     assert len(frame) == 2
     assert frame.index.tz is not None
-    assert list(frame.columns) == ["open", "high", "low", "close", "volume"]
+    assert list(frame.columns)[:5] == ["open", "high", "low", "close", "volume"]
+    assert set(frame.columns[5:]) <= {"quote_volume", "trades", "taker_buy_quote"}
 
 
 def test_fetch_rejects_checksum_mismatch() -> None:
@@ -84,7 +85,7 @@ def test_fetch_without_any_data_raises() -> None:
 
 def test_unsupported_timeframe() -> None:
     with pytest.raises(DataError, match="not supported"):
-        _source({}).fetch_ohlcv("BTC/USDT", "1h", date(2024, 1, 1), date(2024, 1, 31))
+        _source({}).fetch_ohlcv("BTC/USDT", "5m", date(2024, 1, 1), date(2024, 1, 31))
 
 
 def test_normalize_sorts_dedupes_and_localizes() -> None:
@@ -188,3 +189,30 @@ def test_update_history_is_incremental_and_idempotent(tmp_path: Path) -> None:
     assert update_history(config, source, store)["BTC/USDT"].rows == 70
     loaded = load_universe(config, store)["BTC/USDT"]
     assert loaded["close"].tolist() == candles["close"].tolist()
+
+
+def test_off_grid_candles_are_dropped_not_realigned() -> None:
+    """Real case: hourly candles that open 28 minutes late after an exchange outage."""
+    from qts.market_data.sources.binance_vision import drop_off_grid
+
+    index = pd.DatetimeIndex(
+        [
+            "2018-02-08 00:00",
+            "2018-02-08 01:00",
+            "2018-02-09 09:28:14.789",
+            "2018-02-09 10:28:14.789",
+            "2018-02-10 00:00",
+        ],
+        tz="UTC",
+        name="timestamp",
+    )
+    frame = pd.DataFrame(
+        {"open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10.0}, index=index
+    )
+    cleaned = drop_off_grid(frame, "1h", "BTC/USDT")
+    assert list(cleaned.index) == [index[0], index[1], index[4]]  # nothing was moved
+    assert check_quality(cleaned, "1h").ok
+    assert check_quality(cleaned, "1h").missing_candles > 0  # the hole is visible as such
+    assert (
+        len(drop_off_grid(frame.iloc[[0, 1, 4]], "1d", "BTC/USDT")) == 2
+    )  # 01:00 is off the daily grid
