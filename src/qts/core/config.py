@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
 
@@ -140,6 +141,10 @@ class ValidationConfig(_Model):
     """Out-of-sample, walk-forward and Monte Carlo settings."""
 
     out_of_sample_fraction: float = Field(0.3, gt=0, lt=1)
+    #: First day of the out-of-sample segment. When set it replaces the fraction,
+    #: so the boundary does not move when more data arrives. Set it — together
+    #: with ``data.end`` — in any configuration whose results are published.
+    out_of_sample_start: str | None = None
     walk_forward_train_days: int = Field(730, ge=30)
     walk_forward_test_days: int = Field(180, ge=7)
     monte_carlo_simulations: int = Field(2000, ge=100)
@@ -151,6 +156,10 @@ class ValidationConfig(_Model):
             "stop_atr_multiple": (2.0, 3.0),
         }
     )
+
+
+#: (section, key) pairs omitted from the fingerprint while their value is None.
+_FINGERPRINT_OPTIONAL: tuple[tuple[str, str], ...] = (("validation", "out_of_sample_start"),)
 
 
 class AppConfig(_Model):
@@ -175,11 +184,30 @@ class AppConfig(_Model):
             )
         if sizing.max_position_pct > self.risk.max_position_pct:
             raise ValueError("portfolio.sizing.max_position_pct exceeds risk.max_position_pct")
+
+        if self.data.end is not None and self.data.end < self.data.start:
+            raise ValueError("data.end is before data.start")
+        split = self.validation.out_of_sample_start
+        if split is not None:
+            date.fromisoformat(split)  # ValueError -> configuration error
+            if not (self.data.start < split and (self.data.end is None or split <= self.data.end)):
+                raise ValueError(
+                    "validation.out_of_sample_start must lie inside data.start..data.end"
+                )
         return self
 
     def fingerprint(self) -> str:
-        """Stable hash of the full configuration, stored with every result."""
-        payload = json.dumps(self.model_dump(mode="json"), sort_keys=True)
+        """Stable hash of the full configuration, stored with every result.
+
+        Options added after 0.1.0 are left out while they are unset, so the
+        fingerprint of a configuration that does not use them is the same as
+        before — a running paper session is not invalidated by an upgrade.
+        """
+        raw = self.model_dump(mode="json")
+        for section, key in _FINGERPRINT_OPTIONAL:
+            if raw.get(section, {}).get(key) is None:
+                raw.get(section, {}).pop(key, None)
+        payload = json.dumps(raw, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 

@@ -39,21 +39,10 @@ def test_upgrade_is_idempotent(storage: Storage) -> None:
 
 def test_database_created_before_migrations_is_adopted_not_recreated(tmp_path: Path) -> None:
     legacy = Storage(f"sqlite:///{tmp_path / 'legacy.sqlite'}")
-    # what version 0.1.0 did: create_all, no version record
-    first = Base.metadata.tables
-    for name in (
-        "runs",
-        "equity_points",
-        "fills",
-        "trades",
-        "positions",
-        "risk_decisions",
-        "risk_events",
-        "system_events",
-        "heartbeats",
-        "paper_state",
-    ):
-        first[name].create(legacy.engine)
+    # what version 0.1.0 did: the tables of revision 0001, no version record
+    legacy.upgrade("0001")
+    with legacy.engine.begin() as connection:
+        connection.execute(text("DROP TABLE alembic_version"))
     with legacy.engine.begin() as connection:
         connection.execute(
             text(

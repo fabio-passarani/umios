@@ -25,6 +25,8 @@ class Strategy(ABC):
     """Base class for signal generators."""
 
     name: str
+    #: Bump when the rules change, so stored results say which rules produced them.
+    version: str = "0"
 
     @property
     @abstractmethod

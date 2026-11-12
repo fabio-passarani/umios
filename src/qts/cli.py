@@ -19,7 +19,7 @@ import typer
 import yaml
 
 from qts.backtesting.benchmark import buy_and_hold
-from qts.backtesting.engine import run_backtest
+from qts.backtesting.engine import provenance_of, run_backtest
 from qts.backtesting.metrics import compute_metrics
 from qts.backtesting.validation import run_validation
 from qts.core.config import AppConfig, Settings, enforce_mode, load_config
@@ -139,9 +139,92 @@ def backtest(
         f"Risk engine: {len(result.decisions)} orders evaluated, {rejected} rejected; "
         f"kill switch {'TRIPPED' if result.kill_switch_active else 'not tripped'}"
     )
+    provenance = provenance_of(result, data)
+    _print_provenance(provenance)
     if save:
-        run_id = save_backtest(rt.storage, result, metrics, bench)
-        typer.echo(f"Saved as run {run_id}")
+        run_id = save_backtest(rt.storage, result, metrics, bench, provenance)
+        typer.echo(f"Saved as run {run_id}  (re-check any time: qts reproduce {run_id})")
+
+
+def _print_provenance(provenance: dict[str, Any]) -> None:
+    code = provenance["code"]
+    dirty = " (uncommitted changes!)" if code["git_dirty"] else ""
+    typer.echo(
+        f"Data {provenance['data_version']['id']}  code {code['git_commit'][:12]}{dirty}  "
+        f"strategy {provenance['strategy']['name']} {provenance['strategy']['version']}  "
+        f"result {provenance['result_hash']}"
+    )
+    if not provenance["period"]["pinned"]:
+        typer.secho(
+            "WARNING: data.end is not set: this period grows every day and the result is "
+            "not reproducible. Set data.end to pin it.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+    elif not provenance["reproducible"]:
+        typer.secho(
+            "WARNING: code version unknown or uncommitted changes: commit before publishing.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+
+
+@app.command()
+@_guard
+def reproduce(
+    run_id: Annotated[str, typer.Argument(help="Id of a stored backtest run")],
+    config: ConfigOption = None,
+) -> None:
+    """Re-run a stored backtest from its own saved configuration and compare.
+
+    Exit code 0 only if the data is the same and the equity curve comes out
+    identical. A different Git commit is reported but is not a failure by
+    itself: identical results from newer code are exactly what one hopes for.
+    """
+    rt = Runtime(config)
+    run = rt.storage.get_run(run_id)
+    if run is None:
+        raise ConfigError(f"run {run_id} not found")
+    if run.kind != "backtest":
+        raise ConfigError(f"run {run_id} is a {run.kind} session, not a backtest")
+    stored = run.provenance
+    if not stored:
+        raise ConfigError(f"run {run_id} was saved before provenance was recorded")
+    original = AppConfig.model_validate(run.config)
+    data = load_universe(original, ParquetStore(rt.config.data.directory))
+    period = stored["period"]
+    result = run_backtest(original, data, start=period["start"], end=period["end"])
+    now = provenance_of(result, data)
+
+    checks = [
+        ("configuration", stored["config_fingerprint"], now["config_fingerprint"], True),
+        ("data", stored["data_version"]["id"], now["data_version"]["id"], True),
+        ("bars", period["bars"], now["period"]["bars"], True),
+        ("strategy version", stored["strategy"]["version"], now["strategy"]["version"], True),
+        (
+            "code (git commit)",
+            stored["code"]["git_commit"][:12],
+            now["code"]["git_commit"][:12],
+            False,
+        ),
+        ("result", stored["result_hash"], now["result_hash"], True),
+    ]
+    failed = False
+    for name, before, after, required in checks:
+        same = before == after
+        failed |= required and not same
+        verdict = "same" if same else ("DIFFERENT" if required else "different (informational)")
+        typer.echo(f"{name:20} stored {before!s:18} now {after!s:18} {verdict}")
+    stored_metrics = run.metrics or {}
+    metrics = compute_metrics(
+        result.equity, original.portfolio.initial_capital, result.trades, result.exposure
+    )
+    for key in ("total_return", "sharpe", "max_drawdown", "trades"):
+        typer.echo(f"{key:20} stored {stored_metrics.get(key)!s:18} now {metrics[key]!s:18}")
+    if failed:
+        typer.secho("NOT REPRODUCED", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    typer.echo("REPRODUCED: same data, same configuration, identical result")
 
 
 @app.command()

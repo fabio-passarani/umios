@@ -15,6 +15,7 @@ import pandas as pd
 
 from qts.core.config import AppConfig
 from qts.core.errors import DataError
+from qts.core.provenance import build_provenance
 from qts.core.types import Fill, Trade, TradingMode
 from qts.execution.session import Bar, SignalRow, TradingSession
 from qts.market_data.schema import TIMEFRAME_TO_FREQ
@@ -168,11 +169,29 @@ def run_backtest(
         kill_switch_active=session.risk.kill_switch.active,
         metadata={
             "strategy": strategy.name,
+            "strategy_version": strategy.version,
             "symbols": list(data),
             "start": index[0].isoformat(),
             "end": index[-1].isoformat(),
             "bars": len(index),
         },
+    )
+
+
+def provenance_of(result: BacktestResult, data: dict[str, pd.DataFrame]) -> dict[str, Any]:
+    """Provenance record of a finished run (see :mod:`qts.core.provenance`).
+
+    ``data`` must be the frames the run was given: their content hash becomes
+    the data version. Computed on demand, not inside :func:`run_backtest`, so
+    studies that run hundreds of backtests do not pay for it each time.
+    """
+    return build_provenance(
+        config=result.config,
+        fingerprint=result.config_fingerprint,
+        data=data,
+        equity=result.equity,
+        strategy_name=str(result.metadata.get("strategy", "unknown")),
+        strategy_version=str(result.metadata.get("strategy_version", "0")),
     )
 
 

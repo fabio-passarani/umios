@@ -89,6 +89,8 @@ jobs:
       - run: cp .env.example .env
       - run: docker compose --profile freqtrade --profile backup config --quiet
       - name: Build both images (platform and Freqtrade adapter)
+        env:
+          GIT_COMMIT: ${{ github.sha }}  # recorded in the provenance of every result
         run: docker compose --profile freqtrade build
       - run: docker compose run --rm --no-deps paper-trader config
       - name: Freqtrade image loads the platform package and the adapter strategy

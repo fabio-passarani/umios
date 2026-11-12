@@ -29,6 +29,7 @@ class TrendFollowingStrategy(Strategy):
     """See module docstring. All behaviour is driven by :class:`TrendFollowingParams`."""
 
     name = "trend_following"
+    version = "1.0.0"
 
     def __init__(self, params: TrendFollowingParams | None = None) -> None:
         self.params = params or TrendFollowingParams()
