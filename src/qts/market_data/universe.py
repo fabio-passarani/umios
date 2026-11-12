@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 from qts.core.errors import QtsError
@@ -35,6 +36,7 @@ STABLE_OR_FIAT = frozenset(
         "USDC", "BUSD", "TUSD", "USDP", "PAX", "DAI", "FDUSD", "USDS", "SUSD", "UST", "USTC",
         "USDD", "EUR", "EURI", "GBP", "AUD", "BRL", "RUB", "TRY", "UAH", "NGN", "ZAR", "BIDR",
         "IDRT", "BKRW", "BVND", "VAI", "AEUR", "XUSD", "USD1", "PYUSD", "USDE", "EURC",
+        "USDSOLD", "USDSB",
     }
 )  # fmt: skip
 WRAPPED = frozenset({"WBTC", "WBETH", "BETH", "BNSOL"})
@@ -117,3 +119,90 @@ def download_universe(
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(one, symbols))
+
+
+# --------------------------------------------------------------------- membership
+@dataclass(frozen=True)
+class UniverseRules:
+    """Who may be traded on a given day — decided from that day's past only.
+
+    The defaults are stated reasons, not tuned numbers:
+
+    * ``min_history_days`` 90 — a strategy needs indicator history, and the first
+      weeks after a listing are dominated by spikes that no one could trade at
+      the printed prices;
+    * ``max_gap_days`` 3 — a longer hole means the instrument was suspended or
+      the ticker was retired (and sometimes reused for a different asset): its
+      history restarts from zero after the hole;
+    * ``liquidity_window_days`` 30 and ``min_quote_volume`` 1 000 000 — the median
+      traded value per day must make a small account's order a negligible share
+      of the market;
+    * ``top_n`` 30 — the most liquid names among those, so the universe has a
+      stable size through time instead of growing with the number of listings;
+    * membership is reviewed on the first day of each month.
+    """
+
+    min_history_days: int = 90
+    max_gap_days: int = 3
+    liquidity_window_days: int = 30
+    min_quote_volume: float = 1_000_000.0
+    top_n: int = 30
+
+
+def membership(data: dict[str, pd.DataFrame], rules: UniverseRules) -> pd.DataFrame:
+    """Boolean table (day x symbol): True when the symbol belongs to the universe.
+
+    Built from **daily** candles. The row of day *D* uses candles up to *D-1*
+    only, so it is known before *D* opens. Membership changes on the first day
+    of a month and is kept until the next review — except that an instrument
+    stops being a member the day after its last candle.
+    """
+    days = pd.DatetimeIndex(sorted(set().union(*(f.index for f in data.values()))))
+    days = pd.date_range(days[0], days[-1], freq="D", tz="UTC")
+    value = pd.DataFrame(
+        {
+            s: f["quote_volume"] if "quote_volume" in f else f["volume"] * f["close"]
+            for s, f in data.items()
+        }
+    ).reindex(days)
+    present = value.notna()
+
+    # uninterrupted history: days since the last hole longer than max_gap_days
+    age = pd.DataFrame(
+        {s: _age(present[s].to_numpy(), rules.max_gap_days) for s in present.columns}, index=days
+    )
+    median = value.rolling(
+        rules.liquidity_window_days, min_periods=rules.liquidity_window_days // 2
+    ).median()
+
+    # everything shifted by one day: the row of D is what was known at the close of D-1
+    known_age, known_median, traded_yesterday = age.shift(1), median.shift(1), present.shift(1)
+    eligible = (
+        (known_age >= rules.min_history_days)
+        & (known_median >= rules.min_quote_volume)
+        & traded_yesterday.fillna(False).astype(bool)
+    )
+    rank = known_median.where(eligible).rank(axis=1, ascending=False, method="first")
+    chosen = eligible & (rank <= rules.top_n)
+
+    reviews = chosen[days.day == 1]
+    held = reviews.reindex(days).ffill().fillna(False).astype(bool)
+    # an instrument that stopped trading is out from the day after its last candle
+    return held & traded_yesterday.fillna(False).astype(bool)
+
+
+def _age(present: np.ndarray, max_gap: int) -> np.ndarray:
+    """Candles of uninterrupted history at each day (holes up to ``max_gap`` days
+    do not reset it, longer ones do)."""
+    age = np.zeros(len(present), dtype=np.int64)
+    count, hole = 0, 0
+    for i, here in enumerate(present):
+        if here:
+            if hole > max_gap:
+                count = 0
+            count += 1
+            hole = 0
+        else:
+            hole += 1
+        age[i] = count if here or hole <= max_gap else 0
+    return age

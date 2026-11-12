@@ -71,6 +71,7 @@ ignore = ["S101"]
 "tests/e2e/*" = ["S", "DTZ", "E501"]  # driver scripts run inside the container
 "freqtrade/user_data/strategies/*" = ["N"]
 "src/qts/integrations/db/migrations/versions/*" = ["E501"]
+"src/qts/research/data_report.py" = ["E501"]  # markdown table rows
 
 [tool.mypy]
 python_version = "3.11"

@@ -1,0 +1,20 @@
+# Research dataset: every Binance spot USDT pair that ever traded (delisted ones
+# included), daily candles. See docs/research/data.md.
+#
+# The split is fixed. Research may use candles up to development_end; everything
+# after it is the sealed final test, opened only for the final evaluation of a
+# strategy that was frozen beforehand (each opening is recorded in
+# binance-usdt-1d-v1.unseal.jsonl next to this file).
+name: binance-usdt-1d-v1
+exchange: binance
+quote: USDT
+timeframe: 1d
+start: "2017-08-01"
+development_end: "2023-12-31"
+test_end: "2026-11-09"
+rules:
+  min_history_days: 90         # indicator history; listing-day spikes are not tradable
+  max_gap_days: 3              # a longer hole restarts the instrument's history (ticker reuse)
+  liquidity_window_days: 30
+  min_quote_volume: 1000000    # median USDT traded per day
+  top_n: 30                    # most liquid names; reviewed on the first day of each month

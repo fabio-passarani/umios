@@ -41,6 +41,9 @@ from qts.monitoring.health import run_health_checks
 from qts.monitoring.monitor import Monitor
 from qts.reporting.persist import save_backtest
 from qts.reporting.report import HEADLINE_METRICS, format_metric, write_validation_report
+from qts.research.data_report import describe as describe_dataset
+from qts.research.data_report import render as render_data_report
+from qts.research.dataset import DatasetSpec, SealedDataset
 from qts.risk.kill_switch import KillSwitch
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quant Trading System")
@@ -51,6 +54,7 @@ db_app = typer.Typer(no_args_is_help=True, help="Operational database")
 monitor_app = typer.Typer(no_args_is_help=True, help="Health monitoring service")
 report_app = typer.Typer(no_args_is_help=True, help="Daily and soak-test reports")
 universe_app = typer.Typer(no_args_is_help=True, help="Research universe (incl. delisted assets)")
+dataset_app = typer.Typer(no_args_is_help=True, help="Research datasets with a sealed test period")
 app.add_typer(data_app, name="data")
 app.add_typer(paper_app, name="paper")
 app.add_typer(risk_app, name="risk")
@@ -58,6 +62,7 @@ app.add_typer(db_app, name="db")
 app.add_typer(monitor_app, name="monitor")
 app.add_typer(report_app, name="report")
 app.add_typer(universe_app, name="universe")
+app.add_typer(dataset_app, name="dataset")
 
 log = get_logger("cli")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -580,6 +585,62 @@ def universe_download(
     )
     for r in failed:
         typer.echo(f"  {r.symbol}: {r.error}")
+
+
+# ------------------------------------------------------------------------ dataset
+DatasetOption = Annotated[
+    Path, typer.Option("--dataset", "-d", help="Dataset specification (YAML)")
+]
+
+
+def _dataset(rt: Runtime, spec_file: Path) -> SealedDataset:
+    return SealedDataset(DatasetSpec.from_file(spec_file), rt.store, spec_file.parent)
+
+
+@dataset_app.command("build")
+@_guard
+def dataset_build(dataset: DatasetOption, config: ConfigOption = None) -> None:
+    """Freeze a dataset: hash every instrument's development and test segment into
+    the manifest. Done once; a dataset that already has a manifest is never rebuilt
+    (new data means a new dataset name), so the sealed period cannot drift."""
+    sealed = _dataset(Runtime(config), dataset)
+    if sealed.manifest_path.is_file():
+        raise ConfigError(
+            f"{sealed.manifest_path} already exists: verify it, or define a dataset with a new name"
+        )
+    path = sealed.write_manifest()
+    ids = sealed.verify()
+    typer.echo(f"{path}: development {ids['development_id']}, sealed test {ids['test_id']}")
+
+
+@dataset_app.command("verify")
+@_guard
+def dataset_verify(dataset: DatasetOption, config: ConfigOption = None) -> None:
+    """Check that the stored candles are exactly the ones the manifest describes."""
+    sealed = _dataset(Runtime(config), dataset)
+    ids = sealed.verify()
+    typer.echo(
+        f"{sealed.spec.name}: data matches the manifest — development {ids['development_id']}, "
+        f"sealed test {ids['test_id']} (opened {sealed.openings()} time(s))"
+    )
+
+
+@dataset_app.command("report")
+@_guard
+def dataset_report(
+    dataset: DatasetOption,
+    config: ConfigOption = None,
+    output: Annotated[Path | None, typer.Option(help="Write the report here")] = None,
+    live: Annotated[
+        list[str] | None, typer.Option(help="Also compare these symbols with the live API")
+    ] = None,
+) -> None:
+    """Describe a dataset: content, quality findings, who was tradable when."""
+    text = render_data_report(describe_dataset(_dataset(Runtime(config), dataset), live))
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(text, encoding="utf-8")
+    typer.echo(text)
 
 
 # ------------------------------------------------------------------------ monitor
