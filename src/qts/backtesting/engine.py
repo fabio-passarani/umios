@@ -17,8 +17,10 @@ from qts.core.config import AppConfig
 from qts.core.errors import DataError
 from qts.core.provenance import build_provenance
 from qts.core.types import Fill, Trade, TradingMode
+from qts.execution.broker import ExecutionEvent
+from qts.execution.model import MarketConditions, build_execution
 from qts.execution.session import Bar, SignalRow, TradingSession
-from qts.market_data.schema import TIMEFRAME_TO_FREQ
+from qts.market_data.schema import TIMEFRAME_TO_FREQ, bars_per_day
 from qts.portfolio.portfolio import Position
 from qts.portfolio.sizing import PositionSizer
 from qts.risk.engine import RiskEngine
@@ -45,6 +47,8 @@ class BacktestResult:
     config_fingerprint: str
     kill_switch_active: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Orders the venue refused or only partly executed (realistic execution model).
+    execution_events: list[ExecutionEvent] = field(default_factory=list)
 
     @property
     def returns(self) -> pd.Series:
@@ -70,7 +74,78 @@ def build_session(
         costs=config.costs,
         initial_capital=config.portfolio.initial_capital,
         bar_duration=TIMEFRAME_TO_FREQ[config.market.timeframe],
+        execution=build_execution(config.execution, config.costs),
     )
+
+
+def compute_conditions(
+    config: AppConfig,
+    data: dict[str, pd.DataFrame],
+    intraday: dict[str, pd.DataFrame] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """What the execution model may know about each market at each candle.
+
+    * ``traded_value`` — median daily traded value (quote currency) over the
+      trailing window, **ending at the previous candle**;
+    * ``volatility`` — daily volatility of returns over the same window, likewise
+      shifted by one candle;
+    * ``candle_value`` — what traded in the candle itself (the capacity an order
+      meets; it is not used to decide anything);
+    * ``delayed_price`` — with ``execution.delay_hours`` and hourly candles in
+      ``intraday``: the open of the hourly candle that many hours after the
+      candle's own open. NaN where that hour is missing.
+
+    Returns an empty mapping when the configuration uses the legacy model.
+    """
+    cfg = config.execution
+    if cfg is None:
+        return {}
+    per_day = bars_per_day(config.market.timeframe)
+    window = cfg.stats_window_days * per_day
+    out: dict[str, pd.DataFrame] = {}
+    for symbol, frame in data.items():
+        value = (
+            frame["quote_volume"] if "quote_volume" in frame else frame["volume"] * frame["close"]
+        )
+        daily_value = value.rolling(per_day).sum() if per_day > 1 else value
+        table = pd.DataFrame(index=frame.index)
+        table["traded_value"] = (
+            daily_value.rolling(window, min_periods=window // 3).median().shift(1)
+        )
+        returns = frame["close"].pct_change()
+        table["volatility"] = (
+            returns.rolling(window, min_periods=window // 3).std() * np.sqrt(per_day)
+        ).shift(1)
+        table["candle_value"] = value
+        table["delayed_price"] = np.nan
+        hourly = (intraday or {}).get(symbol)
+        if cfg.delay_hours > 0 and hourly is not None:
+            reached = pd.DatetimeIndex(frame.index) + pd.Timedelta(hours=cfg.delay_hours)
+            table["delayed_price"] = hourly["open"].reindex(reached).to_numpy()
+        out[symbol] = table
+    return out
+
+
+def _conditions_at(
+    tables: dict[str, dict[str, np.ndarray[Any, Any]]],
+    positions: dict[str, dict[pd.Timestamp, int]],
+    timestamp: pd.Timestamp,
+    symbols: Any,
+) -> dict[str, MarketConditions]:
+    found: dict[str, MarketConditions] = {}
+    for symbol in symbols:
+        row = positions.get(symbol, {}).get(timestamp)
+        if row is None:
+            continue
+        columns = tables[symbol]
+        late = float(columns["delayed_price"][row])
+        found[symbol] = MarketConditions(
+            traded_value=float(columns["traded_value"][row]),
+            volatility=float(columns["volatility"][row]),
+            candle_value=float(columns["candle_value"][row]),
+            delayed_price=late if np.isfinite(late) and late > 0 else None,
+        )
+    return found
 
 
 def compute_signal_frames(
@@ -129,8 +204,12 @@ def run_backtest(
     start: str | pd.Timestamp | None = None,
     end: str | pd.Timestamp | None = None,
     signals: dict[str, pd.DataFrame] | None = None,
+    intraday: dict[str, pd.DataFrame] | None = None,
 ) -> BacktestResult:
     """Simulate ``strategy`` on ``data``.
+
+    ``intraday`` (hourly candles per symbol) is only needed for an execution
+    delay expressed in hours.
 
     ``start``/``end`` restrict the *trading* window; indicators are still
     computed on all earlier history, so a window does not waste its first
@@ -148,8 +227,16 @@ def run_backtest(
         raise DataError("no bars in the requested backtest window")
 
     session = build_session(config, strategy, TradingMode.BACKTEST)
+    frames = compute_conditions(config, data, intraday)
+    tables = {s: {c: f[c].to_numpy(float) for c in f.columns} for s, f in frames.items()}
+    rows_of = {s: {ts: i for i, ts in enumerate(f.index)} for s, f in frames.items()}
+    last_candle = {symbol: frame.index[-1] for symbol, frame in data.items()}
     for timestamp, bars, rows in timeline:
-        session.process_bar(timestamp.to_pydatetime(), bars, rows)
+        # an asset whose candles ended while a position was open is liquidated first
+        for symbol in [s for s in session.portfolio.positions if last_candle[s] < timestamp]:
+            session.liquidate_delisted(symbol, timestamp.to_pydatetime())
+        conditions = _conditions_at(tables, rows_of, timestamp, bars) if tables else None
+        session.process_bar(timestamp.to_pydatetime(), bars, rows, conditions)
 
     index = pd.DatetimeIndex([p.timestamp for p in session.equity_curve], name="timestamp")
     return BacktestResult(
@@ -162,6 +249,7 @@ def run_backtest(
         fills=list(session.portfolio.fills),
         decisions=list(session.risk.journal.decisions),
         risk_events=list(session.risk.journal.events),
+        execution_events=list(session.broker.events),
         open_positions=list(session.portfolio.positions.values()),
         initial_capital=config.portfolio.initial_capital,
         config=config.model_dump(mode="json"),
