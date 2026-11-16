@@ -86,8 +86,13 @@ class ExecutionModel(ABC):
 
     @abstractmethod
     def cost_bound(self, conditions: MarketConditions | None) -> float:
-        """Upper bound of the cost of a buy as a fraction of its value. Used to
-        size orders and to check cash *before* the fill is known."""
+        """Cost of a buy as a fraction of its value, for an order that takes the
+        largest allowed share of a typical day's volume. Used to size orders and
+        to check cash *before* the fill is known.
+
+        It is a planning figure, not a guarantee: the fill itself is computed
+        afterwards, and the broker shrinks a fill that would cost more than the
+        cash in the account rather than let the account go negative."""
 
     @abstractmethod
     def execute(
