@@ -123,6 +123,40 @@ class CostConfig(_Model):
         return (1.0 + self.slippage_rate) * (1.0 + self.fee_rate) - 1.0
 
 
+class ExecutionConfig(_Model):
+    """Realistic execution model (``qts.execution.model.RealisticExecution``).
+
+    Absent from a configuration, the legacy model applies: ``costs.slippage_bps``
+    on every fill and nothing else. Every default below is labelled in the
+    execution model's documentation as observed, estimated or assumed; the
+    estimates come from one day of live quotes and order books
+    (research/calibration) and the report always shows several scenarios.
+    """
+
+    # half spread (bps) = coefficient * traded_value ** exponent * multiplier   [ESTIMATED]
+    half_spread_coefficient_bps: float = Field(729.0, gt=0)
+    half_spread_exponent: float = Field(-0.379, le=0)
+    spread_multiplier: float = Field(1.0, ge=0)
+    max_half_spread_bps: float = Field(200.0, gt=0)
+    # impact = coefficient * daily volatility * sqrt(order value / traded value)  [ESTIMATED]
+    impact_coefficient: float = Field(0.5, ge=0)
+    # share of the execution candle's traded value one order may take           [ASSUMED]
+    max_participation: float = Field(0.01, gt=0, le=1)
+    # multiplies every volume figure: 0.1 = a market ten times thinner          [scenario]
+    liquidity_scale: float = Field(1.0, gt=0)
+    stats_window_days: int = Field(30, ge=5)
+    # smallest order the venue accepts, in quote currency                       [OBSERVED]
+    min_notional: float = Field(5.0, ge=0)
+    # probability that the venue refuses an order                               [ASSUMED]
+    rejection_rate: float = Field(0.0, ge=0, lt=1)
+    # extra whole candles, or hours (needs hourly candles), before an order is sent
+    delay_bars: int = Field(0, ge=0)
+    delay_hours: int = Field(0, ge=0)
+    # loss on a position whose asset stops trading                              [ASSUMED]
+    delisting_haircut: float = Field(0.10, ge=0, lt=1)
+    seed: int = 42
+
+
 class RiskLimits(_Model):
     """Hard limits enforced by the independent risk engine."""
 
@@ -177,6 +211,8 @@ class AppConfig(_Model):
     costs: CostConfig = CostConfig()
     risk: RiskLimits = RiskLimits()
     validation: ValidationConfig = ValidationConfig()
+    #: Realistic execution model; ``None`` keeps the legacy fixed-cost fills.
+    execution: ExecutionConfig | None = None
 
     @model_validator(mode="after")
     def _consistency(self) -> AppConfig:
@@ -221,6 +257,8 @@ class AppConfig(_Model):
         for section, key in _FINGERPRINT_OPTIONAL:
             if raw.get(section, {}).get(key) is None:
                 raw.get(section, {}).pop(key, None)
+        if raw.get("execution") is None:
+            raw.pop("execution", None)
         payload = json.dumps(raw, sort_keys=True)
         return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
