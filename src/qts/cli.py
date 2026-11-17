@@ -44,6 +44,9 @@ from qts.reporting.report import HEADLINE_METRICS, format_metric, write_validati
 from qts.research.data_report import describe as describe_dataset
 from qts.research.data_report import render as render_data_report
 from qts.research.dataset import DatasetSpec, SealedDataset
+from qts.research.execution_study import render as render_execution_study
+from qts.research.execution_study import run_study, timeframe_diagnostic
+from qts.research.ledger import ExperimentLedger
 from qts.risk.kill_switch import KillSwitch
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Quant Trading System")
@@ -55,6 +58,7 @@ monitor_app = typer.Typer(no_args_is_help=True, help="Health monitoring service"
 report_app = typer.Typer(no_args_is_help=True, help="Daily and soak-test reports")
 universe_app = typer.Typer(no_args_is_help=True, help="Research universe (incl. delisted assets)")
 dataset_app = typer.Typer(no_args_is_help=True, help="Research datasets with a sealed test period")
+research_app = typer.Typer(no_args_is_help=True, help="Research studies (development data only)")
 app.add_typer(data_app, name="data")
 app.add_typer(paper_app, name="paper")
 app.add_typer(risk_app, name="risk")
@@ -63,6 +67,7 @@ app.add_typer(monitor_app, name="monitor")
 app.add_typer(report_app, name="report")
 app.add_typer(universe_app, name="universe")
 app.add_typer(dataset_app, name="dataset")
+app.add_typer(research_app, name="research")
 
 log = get_logger("cli")
 F = TypeVar("F", bound=Callable[..., Any])
@@ -640,6 +645,82 @@ def dataset_report(
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(text, encoding="utf-8")
+    typer.echo(text)
+
+
+# ----------------------------------------------------------------------- research
+@research_app.command("execution-costs")
+@_guard
+def research_execution_costs(
+    dataset: DatasetOption,
+    config: ConfigOption = None,
+    symbols: Annotated[
+        list[str] | None, typer.Option("--symbol", help="Instruments (default: BTC/USDT, ETH/USDT)")
+    ] = None,
+    start: Annotated[str, typer.Option(help="First trading day")] = "2018-01-01",
+    ledger: Annotated[Path, typer.Option(help="Append-only experiment ledger")] = Path(
+        "research/experiments/ledger.jsonl"
+    ),
+    output: Annotated[
+        Path, typer.Option(help="Directory for the JSON and Markdown results")
+    ] = Path("reports/research"),
+    diagnostic: Annotated[
+        list[str] | None,
+        typer.Option(help="Also run the same rules on these timeframes (diagnostic only)"),
+    ] = None,
+) -> None:
+    """Re-run the unchanged strategy under every execution scenario, on the
+    development segment of a sealed dataset only, and record every run."""
+    rt = Runtime(config)
+    sealed = _dataset(rt, dataset)
+    ids = sealed.verify()
+    wanted = symbols or ["BTC/USDT", "ETH/USDT"]
+    split = sealed.spec.split
+    end = sealed.spec.development_end
+
+    def development(timeframe: str) -> dict[str, pd.DataFrame]:
+        out: dict[str, pd.DataFrame] = {}
+        for symbol in wanted:
+            frame = rt.store.read(sealed.spec.exchange, symbol, timeframe, sealed.spec.start)
+            out[symbol] = frame.loc[frame.index < split]
+        return out
+
+    daily = sealed.development(wanted)
+    hourly = development("1h")
+    frames = [daily, hourly]
+    extra = {
+        tf: development(tf) for tf in diagnostic or [] if tf not in ("1h", sealed.spec.timeframe)
+    }
+    if "1h" in (diagnostic or []):
+        extra["1h"] = hourly
+    for group in [*frames, *extra.values()]:
+        for symbol, frame in group.items():
+            if len(frame) and frame.index[-1] >= split:  # never: belt and braces
+                raise ConfigError(f"{symbol}: data beyond the development segment")
+    book = ExperimentLedger(ledger)
+    dataset_ids = {"name": sealed.spec.name, **ids}
+    book.append(
+        "data_access",
+        study="m2-execution-costs",
+        dataset=dataset_ids,
+        segment="development",
+        symbols=wanted,
+        timeframes=sorted({sealed.spec.timeframe, "1h", *extra}),
+        through=end,
+        sealed_test_openings=sealed.openings(),
+    )
+    report = run_study(rt.config, daily, hourly, start, end, book, dataset_ids)
+    report["timeframe_diagnostics"] = [
+        timeframe_diagnostic(rt.config, extra[tf], tf, start, end, book, dataset_ids)
+        for tf in diagnostic or []
+        if tf in extra
+    ]
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "m2-execution-costs.json").write_text(
+        json.dumps(report, indent=1, default=str), encoding="utf-8"
+    )
+    text = render_execution_study(report)
+    (output / "m2-execution-costs.md").write_text(text, encoding="utf-8")
     typer.echo(text)
 
 

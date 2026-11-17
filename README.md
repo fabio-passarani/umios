@@ -124,6 +124,8 @@ Understanding it:
   and the [latest real results](docs/results/2026-11-11-validation-pinned.md)
 - [Research data](docs/research/data.md) — survivorship-free universe, data defects and their
   rules, the sealed test period; [current dataset](docs/research/dataset-binance-usdt-1d-v1.md)
+- [Execution and costs (Milestone 2)](docs/research/m2-execution-costs.md) — realistic execution
+  model, cost scenarios, and whether the strategy survives them
 - [Freqtrade](docs/freqtrade.md) — how the integration works and how to run it
 - [Security](docs/security.md) — secrets, database accounts, what is and is not protected
 - [Licensing](docs/licensing.md) — dependency licences and why there is no `LICENSE` yet

@@ -14,7 +14,7 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-from qts.core.types import Trade
+from qts.core.types import Fill, Trade
 
 PERIODS_PER_YEAR = 365
 
@@ -77,6 +77,8 @@ def trade_statistics(trades: Sequence[Trade]) -> dict[str, float]:
             "expectancy_pct": 0.0,
             "avg_win": 0.0,
             "avg_loss": 0.0,
+            "payoff_ratio": 0.0,
+            "avg_holding_days": 0.0,
             "total_fees": 0.0,
         }
     pnl = np.array([t.pnl for t in trades], dtype=float)
@@ -94,6 +96,13 @@ def trade_statistics(trades: Sequence[Trade]) -> dict[str, float]:
         "expectancy_pct": float(np.mean([t.return_pct for t in trades])),
         "avg_win": float(wins.mean()) if len(wins) else 0.0,
         "avg_loss": float(losses.mean()) if len(losses) else 0.0,
+        # average win / average loss, in absolute value
+        "payoff_ratio": float(wins.mean() / -losses.mean())
+        if len(wins) and len(losses) and losses.mean() < 0
+        else 0.0,
+        "avg_holding_days": float(
+            np.mean([(t.exit_time - t.entry_time).total_seconds() / 86400.0 for t in trades])
+        ),
         "total_fees": float(sum(t.fees for t in trades)),
     }
 
@@ -104,6 +113,7 @@ def compute_metrics(
     trades: Sequence[Trade] = (),
     exposure: pd.Series | None = None,
     periods: int = PERIODS_PER_YEAR,
+    fills: Sequence[Fill] = (),
 ) -> dict[str, float]:
     """Full metric set for an equity curve and (optionally) its trades.
 
@@ -133,5 +143,37 @@ def compute_metrics(
     }
     if exposure is not None and len(exposure):
         metrics["time_in_market"] = float((exposure > 0).mean())
+        metrics["average_exposure"] = float((exposure / equity).clip(lower=0.0).mean())
     metrics.update(trade_statistics(trades))
+    if fills:
+        metrics.update(cost_statistics(fills, equity, periods))
     return metrics
+
+
+def cost_statistics(fills: Sequence[Fill], equity: pd.Series, periods: int) -> dict[str, float]:
+    """Turnover and what trading cost, split by component.
+
+    ``turnover`` is the traded value per year as a multiple of average equity
+    (a round trip of the whole account counts 2). ``cost_drag`` is the yearly
+    cost as a fraction of average equity: what the strategy has to earn before
+    it earns anything.
+    """
+    traded = float(sum(f.quantity * f.price for f in fills))
+    fees = float(sum(f.fee for f in fills))
+    spread = float(sum(f.spread_cost for f in fills))
+    impact = float(sum(f.impact_cost for f in fills))
+    average = float(equity.mean()) if len(equity) else 0.0
+    years = len(equity) / periods if len(equity) else 0.0
+    total = fees + spread + impact
+    scale = average * years
+    return {
+        "fills": float(len(fills)),
+        "traded_value": traded,
+        "turnover": traded / scale if scale > 0 else 0.0,
+        "cost_fees": fees,
+        "cost_spread": spread,
+        "cost_impact": impact,
+        "total_costs": total,
+        "cost_drag": total / scale if scale > 0 else 0.0,
+        "cost_per_traded_bps": total / traded * 1e4 if traded > 0 else 0.0,
+    }

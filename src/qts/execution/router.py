@@ -18,10 +18,16 @@ class OrderRouter:
         self._broker = broker
 
     def submit(
-        self, order: Order, context: RiskContext, market_price: float, timestamp: datetime
+        self,
+        order: Order,
+        context: RiskContext,
+        market_price: float,
+        timestamp: datetime,
+        forced: bool = False,
     ) -> tuple[RiskDecision, Fill | None]:
-        """Evaluate and, if approved, execute. Rejected orders return ``(decision, None)``."""
+        """Evaluate and, if approved, execute. Orders the risk engine rejects, and
+        approved orders the venue does not execute, return ``(decision, None)``."""
         decision = self._risk.evaluate(order, context)
         if not decision.approved or decision.approval is None:
             return decision, None
-        return decision, self._broker.execute(decision.approval, market_price, timestamp)
+        return decision, self._broker.execute(decision.approval, market_price, timestamp, forced)

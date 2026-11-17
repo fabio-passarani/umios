@@ -22,7 +22,24 @@ report compares the two (they were identical on every instrument checked), so a
 backtest describes the same market a running system would see.
 
 What the source does **not** contain: bid and ask prices. Spreads are therefore
-modelled, never measured (see the execution model).
+modelled, never measured (see the execution model and
+[Milestone 2](m2-execution-costs.md)). The only observed quotes are one snapshot
+of live quotes and order books, `research/calibration/binance-spot-2026-11-16.json`,
+taken after the end of the dataset.
+
+## Experiment ledger
+
+`research/experiments/ledger.jsonl` records, append-only, every research data
+access and every experiment: when, with which commit, on which dataset segment,
+under which configuration fingerprint, and what came out (metrics and result
+hash) — flattering or not. Studies write to it themselves
+(`qts research execution-costs`); accesses that happened before it existed are
+recorded retroactively and say so. It is separate from the sealed test's opening
+ledger, which it never replaces.
+
+**BTC/USDT and ETH/USDT are partially contaminated in the test period**: their
+2024-2026 daily candles were used by the published results before the seal
+existed. Only other instruments are clean out-of-sample there.
 
 ## Commands
 

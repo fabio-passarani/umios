@@ -24,6 +24,7 @@ from typing import Any
 from qts.core.config import CostConfig
 from qts.core.types import Fill, Order, OrderReason, Side, SignalRecord, Trade
 from qts.execution.broker import PaperBroker
+from qts.execution.model import ExecutionModel, LegacyExecution, MarketConditions
 from qts.execution.router import OrderRouter
 from qts.portfolio.portfolio import Portfolio, Position
 from qts.portfolio.sizing import PositionSizer
@@ -65,6 +66,8 @@ class _Pending:
     reason: OrderReason = OrderReason.EXIT_SIGNAL
     #: Share of the position an exit closes (1.0 = all of it).
     fraction: float = 1.0
+    #: Candles the order still has to wait before it is sent (execution delay).
+    wait: int = 0
 
 
 class TradingSession:
@@ -78,13 +81,15 @@ class TradingSession:
         costs: CostConfig,
         initial_capital: float,
         bar_duration: Any,
+        execution: ExecutionModel | None = None,
     ) -> None:
         self.strategy_name = strategy_name
         self.sizer = sizer
         self.risk = risk_engine
         self.costs = costs
+        self.execution = execution or LegacyExecution(costs)
         self.portfolio = Portfolio(initial_capital)
-        self.broker = PaperBroker(risk_engine, self.portfolio, costs)
+        self.broker = PaperBroker(risk_engine, self.portfolio, costs, self.execution)
         self.router = OrderRouter(risk_engine, self.broker)
         self.bar_duration = bar_duration
         self.equity_curve: list[EquityPoint] = []
@@ -92,9 +97,15 @@ class TradingSession:
         self.last_close: dict[str, float] = {}
         self.last_bar_time: datetime | None = None
         self._pending: dict[str, _Pending] = {}
+        #: Exits the venue did not complete in this candle: tried again at the next.
+        self._unfinished: dict[str, OrderReason] = {}
 
     # ----------------------------------------------------------------- helpers
-    def _context(self, now: datetime) -> RiskContext:
+    def _cost_bound(self, symbol: str) -> float:
+        """Worst-case cost of a buy in ``symbol``, for sizing and the cash check."""
+        return self.execution.cost_bound(self.broker.market.get(symbol))
+
+    def _context(self, now: datetime, symbol: str | None = None) -> RiskContext:
         data_time = (
             self.last_bar_time + self.bar_duration if self.last_bar_time is not None else now
         )
@@ -104,7 +115,7 @@ class TradingSession:
             positions={s: p.quantity for s, p in self.portfolio.positions.items()},
             prices=dict(self.last_close),
             data_time=data_time,
-            cost_rate=self.costs.cost_rate,
+            cost_rate=self._cost_bound(symbol) if symbol else self.costs.cost_rate,
         )
 
     def _sell(
@@ -114,6 +125,7 @@ class TradingSession:
         reason: OrderReason,
         now: datetime,
         fraction: float = 1.0,
+        forced: bool = False,
     ) -> Fill | None:
         """Reduce or close a position through the risk engine's reduce-only path."""
         share = fraction if math.isfinite(fraction) and 0.0 < fraction < 1.0 else 1.0
@@ -126,7 +138,30 @@ class TradingSession:
             strategy=self.strategy_name,
             created_at=now,
         )
-        _decision, fill = self.router.submit(order, self._context(now), price, now)
+        _decision, fill = self.router.submit(order, self._context(now), price, now, forced)
+        if share == 1.0 and position.symbol in self.portfolio.positions:
+            # the venue executed only part of a full exit (or none of it): the
+            # rest is still a position that has to be closed. Try again next candle.
+            self._unfinished[position.symbol] = reason
+        return fill
+
+    def liquidate_delisted(self, symbol: str, now: datetime) -> Fill | None:
+        """The asset stopped trading with a position open: close it at its last
+        price minus the execution model's delisting haircut.
+
+        There is no market to sell into any more, so this is not a normal order:
+        it books the loss an investor would take (a late exit on a collapsing
+        market, a forced conversion, a withdrawal). It still goes through the
+        risk engine's reduce-only path and is journaled."""
+        position = self.portfolio.positions.get(symbol)
+        last = self.last_close.get(symbol)
+        if position is None or last is None:
+            return None
+        self._pending.pop(symbol, None)
+        self._unfinished.pop(symbol, None)
+        price = last * (1.0 - self.execution.delisting_haircut)
+        fill = self._sell(position, price, OrderReason.DELISTING, now, forced=True)
+        self._unfinished.pop(symbol, None)
         return fill
 
     def request_exit(
@@ -151,13 +186,13 @@ class TradingSession:
     def _enter(self, symbol: str, open_price: float, stop_distance: float, now: datetime) -> None:
         if symbol in self.portfolio.positions:
             return
-        context = self._context(now)
+        context = self._context(now, symbol)
         quantity = self.sizer.size(
             equity=context.equity,
             cash=context.cash,
             price=open_price,
             stop_distance=stop_distance,
-            cost_rate=self.costs.cost_rate,
+            cost_rate=context.cost_rate,
         )
         stop_price = open_price - stop_distance
         if quantity <= 0 or stop_price <= 0:
@@ -176,22 +211,38 @@ class TradingSession:
 
     # -------------------------------------------------------------------- core
     def process_bar(
-        self, timestamp: datetime, bars: dict[str, Bar], signals: dict[str, SignalRow]
+        self,
+        timestamp: datetime,
+        bars: dict[str, Bar],
+        signals: dict[str, SignalRow],
+        conditions: dict[str, MarketConditions] | None = None,
     ) -> EquityPoint:
-        """Advance the account by one bar. ``bars`` holds the symbols that traded."""
+        """Advance the account by one bar. ``bars`` holds the symbols that traded;
+        ``conditions`` what the execution model may know about each market."""
         symbols = sorted(bars)
+        self.broker.market = conditions or {}
 
-        # 1) decisions from the previous close, executed at this open (exits first)
+        def reach(symbol: str) -> float:
+            """Price an order sent at this open actually meets (later, if delayed)."""
+            late = self.broker.market.get(symbol)
+            return late.delayed_price if late and late.delayed_price else bars[symbol].open
+
+        # 1) decisions from the previous close, executed at this open (exits first).
+        #    An order still waiting out its delay stays queued for a later candle.
+        due = [s for s in symbols if (p := self._pending.get(s)) is not None and p.wait <= 0]
         for symbol in symbols:
-            pending = self._pending.get(symbol)
+            if (waiting := self._pending.get(symbol)) is not None and waiting.wait > 0:
+                waiting.wait -= 1
+        for symbol in due:
+            pending = self._pending[symbol]
             position = self.portfolio.positions.get(symbol)
-            if pending is not None and pending.kind == "exit" and position is not None:
-                self._sell(position, bars[symbol].open, pending.reason, timestamp, pending.fraction)
-        for symbol in symbols:
-            pending = self._pending.get(symbol)
-            if pending is not None and pending.kind == "entry":
-                self._enter(symbol, bars[symbol].open, pending.stop_distance, timestamp)
-        for symbol in symbols:
+            if pending.kind == "exit" and position is not None:
+                self._sell(position, reach(symbol), pending.reason, timestamp, pending.fraction)
+        for symbol in due:
+            pending = self._pending[symbol]
+            if pending.kind == "entry":
+                self._enter(symbol, reach(symbol), pending.stop_distance, timestamp)
+        for symbol in due:
             self._pending.pop(symbol, None)
 
         # 2) protective stops (a gap below the stop fills at the open, not at the stop)
@@ -208,6 +259,12 @@ class TradingSession:
                 )
                 self._sell(position, min(bar.open, position.stop_price), reason, timestamp)
 
+        # exits the venue left unfinished are sent again at the next open
+        for symbol, reason in self._unfinished.items():
+            if symbol in self.portfolio.positions:
+                self._pending[symbol] = _Pending("exit", reason=reason)
+        self._unfinished = {}
+
         # 3) mark to market and let the risk engine update its circuit breakers
         for symbol in symbols:
             self.last_close[symbol] = bars[symbol].close
@@ -223,6 +280,7 @@ class TradingSession:
         flatten = self.risk.limits.flatten_on_kill_switch and self.risk.kill_switch.is_active_at(
             timestamp
         )
+        delay = self.execution.delay_bars
         for symbol in symbols:
             position = self.portfolio.positions.get(symbol)
             signal = signals.get(symbol)
@@ -236,10 +294,14 @@ class TradingSession:
                         position.stop_price = candidate
                         position.stop_is_trailing = True
                 if flatten:
-                    self._pending[symbol] = _Pending("exit", reason=OrderReason.KILL_SWITCH)
+                    self._pending[symbol] = _Pending(
+                        "exit", reason=OrderReason.KILL_SWITCH, wait=delay
+                    )
                     action = "exit_queued"
                 elif signal is not None and signal.exit:
-                    self._pending[symbol] = _Pending("exit", reason=OrderReason.EXIT_SIGNAL)
+                    self._pending[symbol] = _Pending(
+                        "exit", reason=OrderReason.EXIT_SIGNAL, wait=delay
+                    )
                     action = "exit_queued"
             elif (
                 signal is not None
@@ -248,7 +310,9 @@ class TradingSession:
                 and math.isfinite(signal.stop_distance)
                 and signal.stop_distance > 0
             ):
-                self._pending[symbol] = _Pending("entry", stop_distance=signal.stop_distance)
+                self._pending[symbol] = _Pending(
+                    "entry", stop_distance=signal.stop_distance, wait=delay
+                )
                 action = "entry_queued"
             if signal is not None:
                 self.signal_log.append(
@@ -294,6 +358,7 @@ class TradingSession:
                     "stop_distance": p.stop_distance if math.isfinite(p.stop_distance) else None,
                     "reason": p.reason.value,
                     "fraction": p.fraction,
+                    "wait": p.wait,
                 }
                 for s, p in self._pending.items()
             },
@@ -324,6 +389,7 @@ class TradingSession:
                 float(p["stop_distance"]) if p["stop_distance"] is not None else math.nan,
                 OrderReason(p["reason"]),
                 float(p.get("fraction", 1.0)),
+                int(p.get("wait", 0)),
             )
             for s, p in state["pending"].items()
         }

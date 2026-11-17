@@ -90,6 +90,14 @@ Reading them plainly:
 - BTC and ETH correlate at 0.82 (never below 0.55 over 90 days): the two assets
   are worth **1.35 independent bets**.
 - An independent Freqtrade backtest of the same rules gives 29 trades and +79.8 %.
+- **Realistic execution** (Milestone 2, [report](research/m2-execution-costs.md);
+  development period 2018–2023 only): liquidity- and volatility-dependent
+  spread and impact, volume limits, delays, refusals and delisting change the
+  result by at most a few tenths of a point; the published 5 bps slippage was the
+  more conservative assumption for BTC/ETH. The weakness is the evidence (17
+  trades, three of them make all the profit), not the costs.
+- Since these figures cover 2024–2026, **that part of the research dataset's
+  sealed test is partially contaminated for BTC/USDT and ETH/USDT**.
 
 Limits of the data and residual biases:
 

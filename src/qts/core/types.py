@@ -39,6 +39,7 @@ class OrderReason(StrEnum):
     MANUAL = "manual"
     EMERGENCY = "emergency"
     KILL_SWITCH = "kill_switch"
+    DELISTING = "delisting"
 
 
 def _new_id() -> str:
@@ -83,6 +84,11 @@ class Fill:
     fee: float
     timestamp: datetime
     reason: OrderReason
+    #: Value lost to the spread and to price impact (already inside ``price``).
+    spread_cost: float = 0.0
+    impact_cost: float = 0.0
+    #: Quantity the order asked for; larger than ``quantity`` for a partial fill.
+    requested_quantity: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
