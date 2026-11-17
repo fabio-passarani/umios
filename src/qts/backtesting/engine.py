@@ -92,8 +92,9 @@ def compute_conditions(
     * ``candle_value`` — what traded in the candle itself (the capacity an order
       meets; it is not used to decide anything);
     * ``delayed_price`` — with ``execution.delay_hours`` and hourly candles in
-      ``intraday``: the open of the hourly candle that many hours after the
-      candle's own open. NaN where that hour is missing.
+      ``intraday``: the open of the first hourly candle at or after that many
+      hours past the candle's own open (the next traded hour when that one is
+      missing). NaN only when no hour traded before the candle ended.
 
     Returns an empty mapping when the configuration uses the legacy model.
     """
@@ -120,9 +121,31 @@ def compute_conditions(
         table["delayed_price"] = np.nan
         hourly = (intraday or {}).get(symbol)
         if cfg.delay_hours > 0 and hourly is not None:
-            reached = pd.DatetimeIndex(frame.index) + pd.Timedelta(hours=cfg.delay_hours)
-            table["delayed_price"] = hourly["open"].reindex(reached).to_numpy()
+            table["delayed_price"] = _delayed_opens(
+                pd.DatetimeIndex(frame.index), hourly["open"], cfg.delay_hours, config.bar
+            )
         out[symbol] = table
+    return out
+
+
+def _delayed_opens(
+    opens_at: pd.DatetimeIndex, hourly_open: pd.Series, hours: int, bar: pd.Timedelta
+) -> np.ndarray[Any, Any]:
+    """Open of the first hourly candle at or after each time + ``hours``.
+
+    When that exact hour is missing (an exchange outage) the order meets the next
+    hour that did trade — never the earlier candle open, which would quietly
+    remove the delay. NaN when nothing traded before the candle ended.
+    """
+    hourly_open = hourly_open.sort_index()
+    index = pd.DatetimeIndex(hourly_open.index).as_unit("ns").asi8
+    reached = (opens_at + pd.Timedelta(hours=hours)).as_unit("ns").asi8
+    limit = (opens_at + bar).as_unit("ns").asi8
+    found = np.searchsorted(index, reached, side="left")
+    out = np.full(len(reached), np.nan)
+    ok = found < len(index)
+    ok[ok] = index[found[ok]] < limit[ok]
+    out[ok] = hourly_open.to_numpy(float)[found[ok]]
     return out
 
 

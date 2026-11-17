@@ -359,3 +359,18 @@ def test_the_risk_engine_keeps_its_authority_under_the_realistic_model() -> None
     assert session.portfolio.fills == []
     assert session.risk.journal.decisions
     assert all(not d.approved for d in session.risk.journal.decisions)
+
+
+def test_a_missing_hour_delays_the_order_to_the_next_traded_hour() -> None:
+    from qts.backtesting.engine import _delayed_opens
+
+    days = pd.date_range("2021-01-01", periods=2, freq="D", tz="UTC")
+    hours = pd.DatetimeIndex(
+        [days[0], days[0] + pd.Timedelta(hours=2), days[0] + pd.Timedelta(hours=3), days[1]]
+    )
+    opens = pd.Series([1.0, 2.0, 3.0, 4.0], index=hours)
+    found = _delayed_opens(days, opens, 1, pd.Timedelta(days=1))
+    # day 1: 01:00 is missing -> 02:00, never the earlier 00:00 open
+    assert found[0] == 2.0
+    # day 2: nothing traded after 00:00 within the day -> unknown, not a stale price
+    assert math.isnan(found[1])

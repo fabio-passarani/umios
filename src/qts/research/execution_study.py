@@ -572,7 +572,9 @@ def timeframe_diagnostic(
 
 # ------------------------------------------------------------------- rendering
 def _pct(value: float) -> str:
-    return "n/a" if not math.isfinite(value) else f"{value * 100:.1f}%"
+    return (
+        "n/a" if not math.isfinite(value) else f"{value * 100 + 0.0:.1f}%".replace("-0.0%", "0.0%")
+    )
 
 
 def _num(value: float, digits: int = 2) -> str:
@@ -616,8 +618,9 @@ def render(report: dict[str, Any]) -> str:
         f"Config fingerprint `{report['config_fingerprint']}`, data version "
         f"`{report['data_version']}`.",
         "",
-        "Expectancy is the mean return per closed trade. Costs are net of nothing: "
-        "fees + spread + impact actually charged.",
+        "Every figure is net of the costs charged in that scenario (fees + spread + "
+        "impact). Expect. $ is the mean profit per closed trade, Expect. % its mean "
+        "return; turnover is traded value per year over average equity.",
         "",
         "## Scenarios",
         "",
@@ -678,8 +681,10 @@ def render(report: dict[str, Any]) -> str:
     out += ["", "## Break-even: uniform cost per fill (fee included)", ""]
     out += _table([(f"{r['bps_per_fill']:g} bps", r) for r in report["sweep"]])
     out += ["", "| Break-even point | bps per fill |", "|---|---|"]
+    top = max(r["bps_per_fill"] for r in report["sweep"])
     for key, value in report["break_even"].items():
-        out.append(f"| {key} | {_num(value, 1)} |")
+        text = _num(value, 1) if math.isfinite(value) else f"not reached up to {top:g}"
+        out.append(f"| {key} | {text} |")
     for diag in report.get("timeframe_diagnostics", []):
         out += [
             "",
