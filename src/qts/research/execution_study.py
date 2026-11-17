@@ -194,6 +194,9 @@ REPORTED = (
     "profit_factor",
     "win_rate",
     "expectancy",
+    "expectancy_pct",
+    "payoff_ratio",
+    "avg_holding_days",
     "turnover",
     "trades",
     "total_costs",
@@ -238,7 +241,25 @@ def _metrics(result: BacktestResult, config: AppConfig) -> dict[str, float]:
     out["delisting_liquidations"] = float(
         sum(1 for t in result.trades if t.exit_reason is OrderReason.DELISTING)
     )
+    out.update(concentration(result))
     return out
+
+
+def concentration(result: BacktestResult) -> dict[str, float]:
+    """How much of the profit a handful of trades made. With few trades a result
+    can rest on one or two of them: that is fragility no cost model shows."""
+    pnl = sorted((t.pnl for t in result.trades), reverse=True)
+    total = float(sum(pnl))
+    open_pnl = float(result.equity.iloc[-1] - result.initial_capital) - total
+    if not pnl or total <= 0:
+        return {"best_trade_share": math.nan, "top3_share": math.nan, "pnl_without_top3": total}
+    return {
+        "best_trade_share": pnl[0] / total,
+        "top3_share": sum(pnl[:3]) / total,
+        # closed-trade profit left without the three best trades (open positions excluded)
+        "pnl_without_top3": float(sum(pnl[3:])),
+        "open_position_pnl": open_pnl,
+    }
 
 
 def _passive(equity: pd.Series, capital: float, config: AppConfig) -> dict[str, float]:
@@ -566,7 +587,8 @@ _COLUMNS: tuple[tuple[str, str, Any], ...] = (
     ("Max DD", "max_drawdown", _pct),
     ("PF", "profit_factor", _num),
     ("Win", "win_rate", _pct),
-    ("Expect.", "expectancy", _pct),
+    ("Expect. $", "expectancy", lambda v: f"{v:,.0f}"),
+    ("Expect. %", "expectancy_pct", _pct),
     ("Turnover/y", "turnover", lambda v: _num(v, 1)),
     ("Trades", "trades", lambda v: f"{v:.0f}"),
     ("Costs $", "total_costs", lambda v: f"{v:,.0f}"),
@@ -619,6 +641,21 @@ def render(report: dict[str, Any]) -> str:
             f"| {r['name']} | {r['basis']} | {m['rejected_orders']:.0f} | "
             f"{m['partial_fills']:.0f} | [{_num(s['ci_low'])}, {_num(s['ci_high'])}] | "
             f"{_pct(s['prob_positive'])} | {_num(s['p_value'], 3)} | {spread} |"
+        )
+    out += [
+        "",
+        "Concentration (closed trades): share of profit from the best trade and the "
+        "best three, and what the other trades made together.",
+        "",
+        "| Scenario | Best trade | Top 3 | P&L without top 3 | Avg hold (days) | Payoff |",
+        "|---|---|---|---|---|---|",
+    ]
+    for r in report["scenarios"]:
+        m = r["metrics"]
+        out.append(
+            f"| {r['name']} | {_pct(m['best_trade_share'])} | {_pct(m['top3_share'])} | "
+            f"{m['pnl_without_top3']:,.0f} | {m['avg_holding_days']:.0f} | "
+            f"{_num(m['payoff_ratio'])} |"
         )
     out += ["", "## Benchmarks", ""]
     out += _table(list(report["benchmarks"].items()))
