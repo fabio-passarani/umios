@@ -22,7 +22,10 @@ Declared explicitly so nothing here is mistaken for a finished feature.
   restorable, but stay on the same machine until the operator copies them.
 - **Secrets manager.** Passwords live in `.env`; `QTS_DB_PASSWORD_FILE` allows
   Docker secrets but the compose file does not use them.
-- **Survivorship-free universe** and a larger, point-in-time asset list.
+- **Historical bid/ask.** Spreads and impact are estimated from one snapshot of
+  live quotes, not measured in the past (see Milestone 2, section 6).
+- **Intraday (5m/15m) research.** Data exists in the archive but is not
+  downloaded, audited or used; nothing validates an intraday strategy.
 - **Tax reporting** (relevant for Italian residents) and exchange reconciliation.
 
 ## Done since the MVP
@@ -34,6 +37,9 @@ automatic backups with a tested restore; reproducible backtests with stored
 provenance; robustness and significance studies; signal journal, monitor
 service, daily report and soak-test verdict; an end-to-end test of the whole
 chain on the running stack ([phase3-report.md](phase3-report.md)).
+Research: survivorship-free universe and sealed dataset (Milestone 1,
+[data](research/data.md)); realistic execution model, experiment ledger and
+cost study (Milestone 2, [report](research/m2-execution-costs.md)).
 
 ## Not verified yet
 

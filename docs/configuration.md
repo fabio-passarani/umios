@@ -24,7 +24,18 @@ Two sources, on purpose:
 | `portfolio.sizing.risk_per_trade_pct` | 0.01 | equity lost if the stop is hit |
 | `portfolio.sizing.max_position_pct` | 0.30 | cap on one position |
 | `costs.fee_rate` | 0.001 | fee per fill, fraction of notional |
-| `costs.slippage_bps` | 5 | adverse slippage per fill |
+| `costs.slippage_bps` | 5 | adverse slippage per fill (legacy execution model only) |
+| `execution` | absent | absent: the legacy model (fixed slippage + fee, every order fills), which every published result uses. Present: the realistic model of `qts.execution.model` |
+| `execution.half_spread_coefficient_bps`, `half_spread_exponent` | 729, −0.379 | **estimated** half spread `= coefficient × daily traded value ^ exponent` (fit on one day of live quotes, `research/calibration`) |
+| `execution.spread_multiplier`, `max_half_spread_bps` | 1, 200 | scenario multiplier and cap; unknown liquidity gets the cap |
+| `execution.impact_coefficient` | 0.5 | **estimated** impact `= k × daily volatility × √(order / daily traded value)` |
+| `execution.max_participation` | 0.01 | **assumed** share of a candle's traded value one order may take; the rest is a partial fill |
+| `execution.liquidity_scale` | 1 | scenario: 0.1 = a market ten times thinner |
+| `execution.stats_window_days` | 30 | trailing window of the liquidity and volatility estimates (ends at the previous candle) |
+| `execution.min_notional` | 5 | **observed** smallest order the venue accepts |
+| `execution.rejection_rate`, `seed` | 0, 42 | **assumed** probability that the venue refuses an order |
+| `execution.delay_bars`, `delay_hours` | 0, 0 | orders sent whole candles, or hours (needs hourly candles), late |
+| `execution.delisting_haircut` | 0.10 | **assumed** loss when an asset stops trading with a position open |
 | `risk.*` | see [risk engine](risk.md) | hard limits; the sizing above may not exceed them |
 | `risk.allowed_symbols` | — | whitelist for **entries**. Both shipped files set it; set it in yours |
 | `risk.flatten_on_kill_switch` | false | close every position when the kill switch trips |
